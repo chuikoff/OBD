@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBD Outlander</string>
+    <string name="scan_devices">Поиск адаптеров</string>
+    <string name="connect">Подключить</string>
+    <string name="disconnect">Отключить</string>
+    <string name="live_readings">Показания</string>
+    <string name="vehicle_profile">Профиль автомобиля</string>
+    <string name="coolant_temp">Температура ОЖ</string>
+    <string name="cvt_temp">Температура CVT</string>
+    <string name="not_connected">Не подключено</string>
+    <string name="connecting">Подключение…</string>
+    <string name="connected">Подключено</string>
+    <string name="transport_classic">Bluetooth Classic (SPP)</string>
+    <string name="transport_ble">Bluetooth LE</string>
+    <string name="cvt_uncertain">CVT: неофициальный PID (см. README)</string>
+    <string name="no_devices">Устройства не найдены. Включите адаптер ELM327.</string>
+    <string name="permissions_needed">Нужны разрешения Bluetooth</string>
+    <string name="celsius">°C</string>
+    <string name="na">—</string>
+    <string name="error">Ошибка</string>
+</resources>

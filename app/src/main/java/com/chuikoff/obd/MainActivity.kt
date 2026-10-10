@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Speed
@@ -31,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.chuikoff.obd.ui.screens.ConnectScreen
 import com.chuikoff.obd.ui.screens.DiagnosticsScreen
+import com.chuikoff.obd.ui.screens.PassportScreen
 import com.chuikoff.obd.ui.screens.ProfileScreen
 import com.chuikoff.obd.ui.screens.ReadingsScreen
 import com.chuikoff.obd.ui.theme.ObdTheme
@@ -123,6 +125,14 @@ fun ObdApp(vm: ObdViewModel) {
                 NavigationBarItem(
                     selected = tab == 3,
                     onClick = { tab = 3 },
+                    icon = { Icon(Icons.Default.Badge, contentDescription = null) },
+                    label = {
+                        Text("Авто", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Clip)
+                    }
+                )
+                NavigationBarItem(
+                    selected = tab == 4,
+                    onClick = { tab = 4 },
                     icon = { Icon(Icons.Default.DirectionsCar, contentDescription = null) },
                     label = {
                         Text("Профиль", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Clip)
@@ -154,6 +164,7 @@ fun ObdApp(vm: ObdViewModel) {
                     onRead = vm::readDtcs,
                     onClearConfirmed = { vm.clearDtcs(confirmed = true) }
                 )
+                3 -> PassportScreen(state, onRefresh = vm::readPassport, exportText = vm::passportExportText)
                 else -> ProfileScreen(state, onSelect = vm::selectProfile)
             }
         }

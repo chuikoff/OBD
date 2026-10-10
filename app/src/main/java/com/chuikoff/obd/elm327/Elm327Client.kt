@@ -21,6 +21,8 @@ class Elm327Client(
     /** True between write() and a received prompt: a cancelled/timed-out exchange leaves the ELM mid-reply. */
     @Volatile private var dirty = false
     private var badStreak = 0
+    /** While true, NO DATA (unsupported PID probing) does not count toward the recovery streak. */
+    @Volatile var tolerateNoData = false
     private var recoveryFailures = 0
     private var lastRecoveryMs = 0L
     private val _linkNote = MutableStateFlow<String?>(null)
@@ -102,7 +104,7 @@ class Elm327Client(
     /** Count only data requests (AT commands answer OK even when the bus is dead). */
     private fun trackLocked(command: String, response: String) {
         if (command.trim().uppercase().startsWith("AT")) return
-        if (isLinkError(response) || isNoData(response)) badStreak++ else {
+        if (isLinkError(response) || (!tolerateNoData && isNoData(response))) badStreak++ else if (tolerateNoData && isNoData(response)) { /* probing */ } else {
             badStreak = 0
             recoveryFailures = 0
             _linkNote.value = null

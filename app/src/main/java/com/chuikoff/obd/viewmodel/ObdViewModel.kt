@@ -13,6 +13,9 @@ import com.chuikoff.obd.data.ObdLiveData
 import com.chuikoff.obd.elm327.Elm327Client
 import com.chuikoff.obd.elm327.Elm327Parser
 import com.chuikoff.obd.sensors.AmbientDisplayFilter
+import com.chuikoff.obd.passport.Passport
+import com.chuikoff.obd.passport.PassportData
+import com.chuikoff.obd.passport.PassportReader
 import com.chuikoff.obd.sensors.CvtDebugEntry
 import com.chuikoff.obd.sensors.CvtDebugLog
 import com.chuikoff.obd.sensors.CvtFormula
@@ -57,7 +60,11 @@ data class ObdUiState(
     val cvtDebugExtra: Boolean = false,
     val cvtLog: List<CvtDebugEntry> = emptyList(),
     /** Non-null while the ELM link is being re-initialised. */
-    val linkNote: String? = null
+    val linkNote: String? = null,
+    // Vehicle passport («Авто»)
+    val passport: PassportData? = null,
+    val passportBusy: Boolean = false,
+    val passportStatus: String? = null
 )
 
 sealed class ConnectionState {
@@ -112,7 +119,11 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         val extra = cvtPrefs.getBoolean(K_CVT_DEBUG_EXTRA, false)
         CvtSettings.formula = formula
         CvtSettings.debugExtraRequests = extra
-        _ui.update { it.copy(cvtFormula = formula, cvtDebugExtra = extra) }
+        val cachedPassport = Passport.deserialize(
+            getApplication<Application>().getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
+                .getString("data", null)
+        )
+        _ui.update { it.copy(cvtFormula = formula, cvtDebugExtra = extra, passport = cachedPassport) }
         viewModelScope.launch {
             CvtDebugLog.entries.collect { list -> _ui.update { it.copy(cvtLog = list) } }
         }
@@ -149,6 +160,48 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
         return CvtDebugLog.exportText(header)
     }
+
+    /**
+     * On-demand passport read (VIN, calibration IDs, supported PIDs, readiness). Pauses sensor
+     * polling, uses the same serialized Elm327Client I/O (mutex + recovery) and resumes polling.
+     * Every item fails independently; the result is cached for offline display.
+     */
+    fun readPassport() {
+        val client = elm
+        if (client == null || _ui.value.connectionState !is ConnectionState.Connected) {
+            _ui.update { it.copy(passportStatus = "Нет подключения — показан сохранённый паспорт") }
+            return
+        }
+        if (_ui.value.passportBusy) return
+        viewModelScope.launch {
+            _ui.update { it.copy(passportBusy = true, passportStatus = "Чтение паспорта…") }
+            val wasPolling = _ui.value.isPolling
+            stopPolling()
+            client.tolerateNoData = true
+            try {
+                client.prepareStandardObdBus()
+                val data = PassportReader.read(
+                    _ui.value.selectedProfile.displayNameRu,
+                    System.currentTimeMillis()
+                ) { cmd, t -> client.send(cmd, timeoutMs = t) }
+                getApplication<Application>().getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
+                    .edit().putString("data", Passport.serialize(data)).apply()
+                _ui.update { it.copy(passport = data, passportStatus = "Обновлено") }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _ui.update { it.copy(passportStatus = "Ошибка чтения: ${e.message ?: "неизвестно"}") }
+            } finally {
+                client.tolerateNoData = false
+                runCatching { client.restoreEngineEcuFilter() }
+                _ui.update { it.copy(passportBusy = false) }
+                if (wasPolling && _ui.value.connectionState is ConnectionState.Connected) startPolling()
+            }
+        }
+    }
+
+    fun passportExportText(): String =
+        _ui.value.passport?.let { Passport.toText(it, com.chuikoff.obd.BuildConfig.VERSION_NAME) } ?: ""
 
     fun selectProfile(profile: VehicleProfile) {
         _ui.update { it.copy(selectedProfile = profile) }

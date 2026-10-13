@@ -99,43 +99,48 @@ fun ObdApp(vm: ObdViewModel) {
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
+                    alwaysShowLabel = true,
                     selected = tab == 0,
                     onClick = { tab = 0 },
                     icon = { Icon(Icons.Default.Bluetooth, contentDescription = null) },
                     label = {
-                        Text("Подключ.", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Clip)
+                        Text("Подключ.", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
                 )
                 NavigationBarItem(
+                    alwaysShowLabel = true,
                     selected = tab == 1,
                     onClick = { tab = 1 },
                     icon = { Icon(Icons.Default.Speed, contentDescription = null) },
                     label = {
-                        Text("Показания", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Clip)
+                        Text("Показания", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
                 )
                 NavigationBarItem(
+                    alwaysShowLabel = true,
                     selected = tab == 2,
                     onClick = { tab = 2 },
                     icon = { Icon(Icons.Default.Build, contentDescription = null) },
                     label = {
-                        Text("Ошибки", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Clip)
+                        Text("Ошибки", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
                 )
                 NavigationBarItem(
+                    alwaysShowLabel = true,
                     selected = tab == 3,
                     onClick = { tab = 3 },
                     icon = { Icon(Icons.Default.Badge, contentDescription = null) },
                     label = {
-                        Text("Авто", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Clip)
+                        Text("Авто", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
                 )
                 NavigationBarItem(
+                    alwaysShowLabel = true,
                     selected = tab == 4,
                     onClick = { tab = 4 },
                     icon = { Icon(Icons.Default.DirectionsCar, contentDescription = null) },
                     label = {
-                        Text("Профиль", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Clip)
+                        Text("Профиль", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
                 )
             }

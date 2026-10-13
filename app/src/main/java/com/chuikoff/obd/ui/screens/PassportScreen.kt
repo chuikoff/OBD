@@ -7,6 +7,12 @@ import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -60,22 +66,26 @@ fun PassportScreen(state: ObdUiState, onRefresh: () -> Unit, exportText: () -> S
                 )
             }
             Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Button(
-                    onClick = onRefresh,
-                    enabled = connected && !state.passportBusy,
-                    modifier = Modifier.weight(1.2f)
-                ) { Text(if (state.passportBusy) "Чтение…" else "Обновить", maxLines = 1) }
+            Button(
+                onClick = onRefresh,
+                enabled = connected && !state.passportBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (state.passportBusy) "Чтение…" else "Обновить", maxLines = 1) }
+            Spacer(Modifier.height(4.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val pad = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
                 OutlinedButton(
                     onClick = { copy(context, exportText()) },
                     enabled = d != null,
-                    modifier = Modifier.weight(1f)
-                ) { Text("Копировать", maxLines = 1) }
+                    modifier = Modifier.weight(1f),
+                    contentPadding = pad
+                ) { Text("Копировать", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelLarge) }
                 OutlinedButton(
                     onClick = { share(context, exportText()) },
                     enabled = d != null,
-                    modifier = Modifier.weight(1f)
-                ) { Text("Поделиться", maxLines = 1) }
+                    modifier = Modifier.weight(1f),
+                    contentPadding = pad
+                ) { Text("Поделиться", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelLarge) }
             }
             if (!connected) {
                 Text(
@@ -91,6 +101,7 @@ fun PassportScreen(state: ObdUiState, onRefresh: () -> Unit, exportText: () -> S
             item { IdsCard(d) }
             item { ReadinessCard(d) }
             item { PidsCard(d) }
+            if (d.raw09.isNotEmpty()) item { RawCard(d) }
         } else {
             item { Text("Данных пока нет.", style = MaterialTheme.typography.bodyMedium) }
         }
@@ -122,6 +133,7 @@ private fun VinCard(d: PassportData) = Section("VIN") {
     } else {
         val i = Passport.decodeVin(d.vin)
         Text(d.vin, style = MaterialTheme.typography.headlineSmall, fontFamily = FontFamily.Monospace)
+        if (d.vinPartial) Text("неполный ответ", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         if (!i.valid) Text("Внимание: " + i.problems.joinToString("; "), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         (i.makerRu ?: i.countryRu)?.let { Text("Производитель/страна: $it", style = MaterialTheme.typography.bodyMedium) }
         i.modelYear?.let { Text("Модельный год: $it (или ${it - 30})", style = MaterialTheme.typography.bodyMedium) }
@@ -137,9 +149,9 @@ private fun IdsCard(d: PassportData) = Section("Идентификаторы Э�
             Text(it, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
         }
     }
-    row("Calibration ID", d.calIds, d.calError)
+    row("Calibration ID" + if (d.calPartial) " (неполный)" else "", d.calIds, d.calError)
     row("CVN", d.cvns, d.cvnError)
-    row("Имя ЭБУ", d.ecuNames, d.ecuError)
+    row("Имя ЭБУ" + if (d.ecuPartial) " (неполный)" else "", d.ecuNames, d.ecuError)
 }
 
 @Composable
@@ -170,6 +182,17 @@ private fun PidsCard(d: PassportData) = Section("Поддерживаемые PI
     if (p == null) { Err(d.pids01Error); return@Section }
     Text("Всего: ${p.size}" + (d.pids09?.let { " · Mode 09: ${it.size}" } ?: ""), style = MaterialTheme.typography.bodyMedium)
     p.forEach { Text(Passport.pidLabel(it), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace) }
+}
+
+@Composable
+private fun RawCard(d: PassportData) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    Section("Сырые ответы Mode 09") {
+        TextButton(onClick = { open = !open }) { Text(if (open) "Свернуть" else "Показать (${d.raw09.size})") }
+        if (open) d.raw09.forEach {
+            Text(it, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+        }
+    }
 }
 
 private fun copy(context: Context, text: String) {

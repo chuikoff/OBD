@@ -36,7 +36,9 @@ class PassportTest {
         assertEquals(vin, Passport.parseVin(raw))
         assertNull(Passport.parseVin("NO DATA\r\r>"))
         assertNull(Passport.parseVin("STOPPED\r>"))
-        assertNull(Passport.parseVin("014\r0:490201${hex(vin).substring(0, 6)}\r\r>")) // truncated → incomplete
+        // truncated (frames 1,2 lost) → kept as partial since 1.11.1
+        val part = Passport.parseVinDetailed("014\r0:490201${hex(vin).substring(0, 6)}\r\r>")!!
+        assertEquals("JA4", part.value); assertTrue(part.partial)
         assertNull(Passport.parseVin("")) // garbage must not throw
         assertNull(Passport.parseVin("ZZZ\u0000\r?"))
     }
@@ -162,5 +164,104 @@ class PassportTest {
         assertNull(d.vin); assertNull(d.pids01); assertNull(d.readiness)
         assertEquals(Passport.NO_RESPONSE, d.pids01Error)
         assertEquals(PassportData::class, d::class)
+    }
+}
+
+class PassportMode09VariantsTest {
+    private val vin = "JA4AZ3A31GZ012345"
+    private val cal = "1860C5730000AB12"
+    private fun hex(s: String) = s.map { "%02X".format(it.code) }.joinToString("")
+
+    /** headers off, CAF on: length line + numbered frames */
+    private fun noHdr(dataHex: String): String {
+        val len = dataHex.length / 2
+        val f0 = dataHex.substring(0, 12)
+        val sb = StringBuilder("%03X\r0:%s\r".format(len, f0))
+        dataHex.substring(12).chunked(14).forEachIndexed { i, c -> sb.append("${i + 1}:$c\r") }
+        return sb.append("\r>").toString()
+    }
+
+    /** headers on (ATH1): FF 10 LL + 6 bytes, CF 21.. + 7 bytes, padded */
+    private fun hdr(id: String, dataHex: String): String {
+        val len = dataHex.length / 2
+        val sb = StringBuilder("$id 10 %02X %s\r".format(len, dataHex.substring(0, 12).chunked(2).joinToString(" ")))
+        dataHex.substring(12).chunked(14).forEachIndexed { i, c ->
+            val padded = c.padEnd(14, 'A')
+            sb.append("$id %02X %s\r".format(0x21 + i, padded.chunked(2).joinToString(" ")))
+        }
+        return sb.toString()
+    }
+
+    @Test fun vinWithCountByte() {
+        val r = Passport.parseVinDetailed(noHdr("490201" + hex(vin)))!!
+        assertEquals(vin, r.value); assertFalse(r.partial)
+    }
+
+    @Test fun vinWithoutCountByte() {
+        // 49 02 + 17 chars = 19 bytes
+        val r = Passport.parseVinDetailed(noHdr("4902" + hex(vin)))!!
+        assertEquals(vin, r.value); assertFalse(r.partial)
+    }
+
+    @Test fun vinHeadersOnAnd7E8Preferred() {
+        val other = "JA4ZZZZZZZZ999999"
+        val raw = hdr("7EA", "490201" + hex(other)) + hdr("7E8", "490201" + hex(vin)) + ">"
+        val r = Passport.parseVinDetailed(raw)!!
+        assertEquals(vin, r.value); assertFalse(r.partial)
+    }
+
+    @Test fun vinPartialWhenFrameMissing() {
+        val full = noHdr("490201" + hex(vin))
+        val lines = full.split("\r").filter { !it.startsWith("2:") }.joinToString("\r")
+        val r = Passport.parseVinDetailed(lines)!!
+        assertTrue(r.partial)
+        assertTrue(vin.startsWith(r.value))
+        assertNull(Passport.parseVinDetailed("STOPPED\r>"))
+    }
+
+    @Test fun calIdTwoBlocksWithAndWithoutCount() {
+        val two = cal + "AB12CD34EF560000".let { it } // second block
+        val withCount = Passport.parseCalIdsDetailed(noHdr("490402" + hex(cal) + hex("AB12CD34EF56") + "00000000"))!!
+        assertEquals(listOf(cal, "AB12CD34EF56"), withCount.value); assertFalse(withCount.partial)
+        val noCount = Passport.parseCalIdsDetailed(noHdr("4904" + hex(cal)))!!
+        assertEquals(listOf(cal), noCount.value); assertFalse(noCount.partial)
+        assertTrue(two.isNotEmpty())
+    }
+
+    @Test fun ecuNameHeadersOnMultiEcu() {
+        val e1 = "ECM\u0000-EngineControl\u0000"   // 20 bytes
+        val e2 = "TCM\u0000-TransmissionCtr" .take(20)
+        val raw = hdr("7E9", "490A01" + hex(e2)) + hdr("7E8", "490A01" + hex(e1)) + ">"
+        val r = Passport.parseEcuNamesDetailed(raw)!!
+        assertEquals("ECM-EngineControl", r.value.first())
+        assertEquals(2, r.value.size)
+    }
+
+    @Test fun readerFallsBackToPhysicalAndLogsRaw() = runBlocking {
+        val sent = mutableListOf<String>()
+        var header = "7DF"
+        val d = PassportReader.read("T", 1L) { cmd, _ ->
+            sent += cmd
+            if (cmd.startsWith("ATSH")) header = cmd.removePrefix("ATSH")
+            when {
+                cmd.startsWith("AT") -> "OK\r>"
+                cmd == "0900" -> "490054400000\r>"            // 02,04,06,0A
+                cmd == "0902" && header == "7E0" -> noHdr("490201" + hex(vin))
+                cmd == "0902" -> "NO DATA\r>"                 // functional: silent
+                cmd == "0906" -> "490601D418EB92\r>"
+                else -> "NO DATA\r>"
+            }
+        }
+        assertEquals(vin, d.vin); assertFalse(d.vinPartial)
+        assertEquals(listOf("D418EB92"), d.cvns)
+        assertEquals(Passport.NO_RESPONSE, d.calError)
+        assertTrue(sent.contains("ATSH7E0") && sent.contains("ATCRA7E8"))
+        assertEquals("ATSH7DF", sent.last { it.startsWith("ATSH") }) // restored to functional
+        assertTrue(d.raw09.any { it.startsWith("0902 @7E0:") && it.contains("490201") })
+        assertTrue(d.raw09.any { it.startsWith("0902 @7DF:") && it.contains("NODATA") })
+        // raw with \r survives cache round-trip and is in the shared text
+        val back = Passport.deserialize(Passport.serialize(d))!!
+        assertEquals(d, back)
+        assertTrue(Passport.toText(d).contains("Сырые ответы Mode 09"))
     }
 }

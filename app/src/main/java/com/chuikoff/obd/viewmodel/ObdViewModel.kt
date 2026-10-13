@@ -180,6 +180,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             client.tolerateNoData = true
             try {
                 client.prepareStandardObdBus()
+                // Long multi-frame Mode 09 replies: default flow control, max per-frame wait
+                runCatching { client.send("ATFCSM0", timeoutMs = 1500) }
+                runCatching { client.send("ATAT1", timeoutMs = 1500) }
+                runCatching { client.send("ATSTFF", timeoutMs = 1500) }
                 val data = PassportReader.read(
                     _ui.value.selectedProfile.displayNameRu,
                     System.currentTimeMillis()
@@ -193,6 +197,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.update { it.copy(passportStatus = "Ошибка чтения: ${e.message ?: "неизвестно"}") }
             } finally {
                 client.tolerateNoData = false
+                // back to normal timing; CVT/AWC sensors re-send their own ATFCSH/FCSD/FCSM1/ATST pre-commands
+                runCatching { client.send("ATST32", timeoutMs = 1500) }
                 runCatching { client.restoreEngineEcuFilter() }
                 _ui.update { it.copy(passportBusy = false) }
                 if (wasPolling && _ui.value.connectionState is ConnectionState.Connected) startPolling()

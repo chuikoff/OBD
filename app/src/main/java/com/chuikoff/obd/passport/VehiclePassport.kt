@@ -33,8 +33,16 @@ data class PassportData(
     val pids01Error: String? = null,
     val pids09: List<Int>? = null,
     val readiness: Readiness? = null,
-    val readinessError: String? = null
+    val readinessError: String? = null,
+    val vinPartial: Boolean = false,
+    val calPartial: Boolean = false,
+    val ecuPartial: Boolean = false,
+    /** Raw ELM text of every Mode 09 exchange («0902 @7DF: …»). */
+    val raw09: List<String> = emptyList()
 )
+
+/** Parsed value + whether the reply was incomplete (lost/missing frames, short data). */
+data class Parsed<T>(val value: T, val partial: Boolean)
 
 data class VinInfo(
     val valid: Boolean,
@@ -104,39 +112,66 @@ object Passport {
     private fun asciiClean(b: ByteArray): String =
         String(b.filter { u(it) in 0x20..0x7E }.toByteArray(), Charsets.US_ASCII).trim()
 
-    /** Mode 09 PID 02: [count] + 17 ASCII (some ECUs omit the count byte or pad with 00). */
-    fun parseVin(raw: String): String? {
-        val p = payloads(raw, 0x49, 0x02).firstOrNull() ?: return null
-        val data = when {
-            p.size >= 18 && u(p[0]) <= 0x05 -> p.copyOfRange(1, p.size)
-            else -> p
-        }
-        val s = asciiClean(data)
-        return s.takeIf { it.isNotEmpty() }
+    data class Msg09(val payload: ByteArray, val complete: Boolean, val headerId: String?)
+
+    /**
+     * Messages answering svc/pid — complete or not — engine ECU (7E8) first, then complete before
+     * partial, then longest. Works with headers on/off and several answering ECUs.
+     */
+    fun messages(raw: String, svc: Int, pid: Int): List<Msg09> {
+        if (raw.isBlank() || Elm327Parser.clean(raw).contains("NODATA")) return emptyList()
+        return runCatching {
+            Elm327Parser.assemble(raw)
+                .filter { it.bytes.size >= 2 && u(it.bytes[0]) == svc && u(it.bytes[1]) == pid }
+                .map { Msg09(it.bytes.copyOfRange(2, it.bytes.size), it.complete, it.headerId) }
+                .sortedWith(compareBy<Msg09>({ if (it.headerId == "7E8") 0 else 1 }, { if (it.complete) 0 else 1 }, { -it.payload.size }))
+        }.getOrDefault(emptyList())
     }
 
-    /** Mode 09 PID 04: [count] + N×16 ASCII. */
-    fun parseCalIds(raw: String): List<String> =
-        payloads(raw, 0x49, 0x04).flatMap { p -> chunks(p, 16).map { asciiClean(it) }.filter { it.isNotEmpty() } }
+    /** Drop a leading NODI/count byte (or 00 padding): VIN/CALID/ECU-name chars are printable. */
+    private fun dropCount(p: ByteArray): ByteArray =
+        if (p.isNotEmpty() && u(p[0]) < 0x20) p.copyOfRange(1, p.size) else p
+
+    /** Mode 09 PID 02 — VIN, with or without the count byte; partial if short / frames missing. */
+    fun parseVinDetailed(raw: String): Parsed<String>? {
+        val m = messages(raw, 0x49, 0x02).firstOrNull() ?: return null
+        val s = asciiClean(m.payload)
+        if (s.isEmpty()) return null
+        return Parsed(s, !m.complete || s.length < 17)
+    }
+
+    fun parseVin(raw: String): String? = parseVinDetailed(raw)?.value
+
+    /** Mode 09 PID 04 — N × 16 ASCII blocks (00-padded) after optional count byte. */
+    fun parseCalIdsDetailed(raw: String): Parsed<List<String>>? {
+        val m = messages(raw, 0x49, 0x04).firstOrNull() ?: return null
+        val body = dropCount(m.payload)
+        val blocks = body.toList().chunked(16)
+        val ids = blocks.map { asciiClean(it.toByteArray()) }.filter { it.isNotEmpty() }
+        if (ids.isEmpty()) return null
+        return Parsed(ids, !m.complete || body.size % 16 != 0)
+    }
+
+    fun parseCalIds(raw: String): List<String> = parseCalIdsDetailed(raw)?.value ?: emptyList()
 
     /** Mode 09 PID 06: [count] + N×4 bytes, shown as hex. */
     fun parseCvns(raw: String): List<String> =
-        payloads(raw, 0x49, 0x06).flatMap { p ->
-            chunks(p, 4).filter { it.size == 4 }.map { c -> c.joinToString("") { "%02X".format(u(it)) } }
-        }.filter { it != "00000000" }
+        messages(raw, 0x49, 0x06).filter { it.complete }.flatMap { m ->
+            val p = m.payload
+            val body = if (p.size % 4 == 1) p.copyOfRange(1, p.size) else p
+            body.toList().chunked(4).filter { it.size == 4 }.map { c -> c.joinToString("") { "%02X".format(u(it)) } }
+        }.filter { it != "00000000" }.distinct()
 
-    /** Mode 09 PID 0A: [count] + 20 ASCII ECU name. */
-    fun parseEcuNames(raw: String): List<String> =
-        payloads(raw, 0x49, 0x0A).map { p ->
-            asciiClean(if (p.size >= 21 || (p.isNotEmpty() && u(p[0]) <= 0x05 && p.size % 20 == 1)) p.copyOfRange(1, p.size) else p)
-        }.filter { it.isNotEmpty() }
-
-    /** Drops the leading count byte and splits the rest in [size]-byte blocks. */
-    private fun chunks(p: ByteArray, size: Int): List<ByteArray> {
-        if (p.isEmpty()) return emptyList()
-        val body = if ((p.size - 1) % size == 0) p.copyOfRange(1, p.size) else p
-        return body.toList().chunked(size).map { it.toByteArray() }
+    /** Mode 09 PID 0A — 20-char ECU name after optional count byte. */
+    fun parseEcuNamesDetailed(raw: String): Parsed<List<String>>? {
+        val ms = messages(raw, 0x49, 0x0A)
+        if (ms.isEmpty()) return null
+        val names = ms.map { asciiClean(dropCount(it.payload)) }.filter { it.isNotEmpty() }.distinct()
+        if (names.isEmpty()) return null
+        return Parsed(names, !ms.first().complete)
     }
+
+    fun parseEcuNames(raw: String): List<String> = parseEcuNamesDetailed(raw)?.value ?: emptyList()
 
     // ---------- supported PIDs ----------
     /** Bitmask of 4 bytes → PIDs base+1 … base+32 (MSB first). */
@@ -229,7 +264,7 @@ object Passport {
         append("Паспорт авто")
         if (appVersion != null) append(" (OBD $appVersion)")
         append("\nПрофиль: ${d.profileName}\nОбновлено: ${fmt.format(Date(d.timestampMs))}\n\n")
-        append("VIN: ${d.vin ?: "— (${d.vinError ?: NO_RESPONSE})"}\n")
+        append("VIN: ${d.vin?.let { it + if (d.vinPartial) " (неполный)" else "" } ?: "— (${d.vinError ?: NO_RESPONSE})"}\n")
         if (d.vin != null) {
             val i = decodeVin(d.vin)
             append("  ${if (i.valid) "VIN корректен" else "ВНИМАНИЕ: " + i.problems.joinToString("; ")}\n")
@@ -241,9 +276,9 @@ object Passport {
             append("$title: ")
             if (items.isEmpty()) append("— (${err ?: NO_RESPONSE})\n") else append(items.joinToString(", ")).append("\n")
         }
-        list("Calibration ID", d.calIds, d.calError)
+        list("Calibration ID" + if (d.calPartial) " (неполный)" else "", d.calIds, d.calError)
         list("CVN", d.cvns, d.cvnError)
-        list("ЭБУ", d.ecuNames, d.ecuError)
+        list("ЭБУ" + if (d.ecuPartial) " (неполный)" else "", d.ecuNames, d.ecuError)
         append("\nПоддерживаемые PID (Mode 01): ")
         if (d.pids01 == null) append("— (${d.pids01Error ?: NO_RESPONSE})\n") else {
             append("${d.pids01.size}\n")
@@ -256,16 +291,20 @@ object Passport {
             append("MIL ${if (r.milOn) "горит" else "не горит"}, DTC: ${r.dtcCount}\n")
             r.monitors.forEach { append("  ${it.nameRu}: ${it.status.labelRu}\n") }
         }
+        if (d.raw09.isNotEmpty()) {
+            append("\nСырые ответы Mode 09:\n")
+            d.raw09.forEach { append("  $it\n") }
+        }
     }
 
     // ---------- cache serialization (no org.json: unit-testable on JVM) ----------
     private const val SEP = "\u001F"
-    private fun esc(s: String) = s.replace("\\", "\\\\").replace("\n", "\\n")
+    private fun esc(s: String) = s.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
     private fun unesc(s: String): String {
         val sb = StringBuilder(); var i = 0
         while (i < s.length) {
             val c = s[i]
-            if (c == '\\' && i + 1 < s.length) { sb.append(if (s[i + 1] == 'n') '\n' else s[i + 1]); i += 2 } else { sb.append(c); i++ }
+            if (c == '\\' && i + 1 < s.length) { sb.append(when (s[i + 1]) { 'n' -> '\n'; 'r' -> '\r'; else -> s[i + 1] }); i += 2 } else { sb.append(c); i++ }
         }
         return sb.toString()
     }
@@ -284,6 +323,8 @@ object Passport {
                 r.monitors.joinToString(SEP) { "${it.nameRu}=${it.status.name}" }
         }
         d.readinessError?.let { m["rdyErr"] = it }
+        m["part"] = listOf(d.vinPartial, d.calPartial, d.ecuPartial).joinToString(",") { if (it) "1" else "0" }
+        if (d.raw09.isNotEmpty()) m["raw09"] = d.raw09.joinToString(SEP)
         return m.entries.joinToString("\n") { "${it.key}=${esc(it.value)}" }
     }
 
@@ -302,10 +343,13 @@ object Passport {
                         Monitor(it.substringBeforeLast('='), MonitorStatus.valueOf(it.substringAfterLast('=')))
                     })
             }
+            val part = m["part"]?.split(",")?.map { it == "1" } ?: listOf(false, false, false)
             PassportData(
                 m["ts"]!!.toLong(), m["profile"] ?: "", m["vin"], m["vinErr"],
                 l("cal"), m["calErr"], l("cvn"), m["cvnErr"], l("ecu"), m["ecuErr"],
-                ints("p01"), m["p01Err"], ints("p09"), rdy, m["rdyErr"]
+                ints("p01"), m["p01Err"], ints("p09"), rdy, m["rdyErr"],
+                part.getOrElse(0) { false }, part.getOrElse(1) { false }, part.getOrElse(2) { false },
+                l("raw09")
             )
         } catch (_: Exception) { null }
     }
@@ -313,37 +357,75 @@ object Passport {
 
 /** Runs the passport requests through a caller-supplied (mutex-serialized) send function. */
 object PassportReader {
-    /** [send] = Elm327Client.send; bus must already be prepared (ATSH7DF / ATAR). */
+    const val PER_REQUEST_TIMEOUT_MS = 5000L
+
+    /**
+     * [send] = Elm327Client.send (AT commands included); bus must already be prepared
+     * (ATSH7DF / ATAR, ATFCSM0, ATAT1, ATSTFF). Mode 09 strategy per item: functional 7DF,
+     * retry once, then physical 7E0/7E8 twice; first complete answer wins, otherwise the best
+     * partial one is kept and marked «неполный». Every exchange's raw text is recorded.
+     */
     suspend fun read(
         profileName: String,
         nowMs: Long,
         send: suspend (cmd: String, timeoutMs: Long) -> String
     ): PassportData {
-        suspend fun ask(cmd: String, t: Long = 5000): String =
+        val raw09 = mutableListOf<String>()
+        suspend fun ask(cmd: String, t: Long = PER_REQUEST_TIMEOUT_MS): String =
             try { send(cmd, t) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { "" }
+        var physical = false
+        suspend fun functional() {
+            if (physical) { ask("ATSH7DF", 2000); ask("ATAR", 2000); physical = false }
+        }
+        suspend fun toPhysical() {
+            if (!physical) { ask("ATSH7E0", 2000); ask("ATCRA7E8", 2000); physical = true }
+        }
+        fun log(cmd: String, raw: String) {
+            raw09 += "$cmd @${if (physical) "7E0" else "7DF"}: " +
+                Elm327Parser.displayRaw(raw).ifEmpty { "(пусто)" }
+        }
+
+        suspend fun <T> mode09(cmd: String, parse: (String) -> Parsed<T>?): Parsed<T>? {
+            var best: Parsed<T>? = null
+            for (attempt in 0 until 4) {
+                if (attempt < 2) functional() else toPhysical()
+                val raw = ask(cmd)
+                log(cmd, raw)
+                val r = runCatching { parse(raw) }.getOrNull()
+                if (r != null && !r.partial) return r
+                if (r != null && best == null) best = r
+            }
+            return best
+        }
 
         // Mode 09 support
-        val p09 = Passport.parseSupportReply(ask("0900"), 0x49, 0x00)
+        val sup = mode09("0900") { raw ->
+            Passport.parseSupportReply(raw, 0x49, 0x00)?.let { Parsed(it, false) }
+        }
+        val p09 = sup?.value
         fun sup09(pid: Int) = p09?.contains(pid) ?: true // unknown support → just try
 
-        // VIN
-        var vin: String? = null; var vinErr: String? = null
+        var vin: String? = null; var vinErr: String? = null; var vinPart = false
         if (!sup09(0x02)) vinErr = Passport.NOT_SUPPORTED else {
-            vin = Passport.parseVin(ask("0902"))
-            if (vin == null) vinErr = if (p09 == null) Passport.NO_RESPONSE else Passport.NO_RESPONSE
+            val r = mode09("0902") { Passport.parseVinDetailed(it) }
+            if (r == null) vinErr = Passport.NO_RESPONSE else { vin = r.value; vinPart = r.partial }
         }
-        var cal = emptyList<String>(); var calErr: String? = null
+        var cal = emptyList<String>(); var calErr: String? = null; var calPart = false
         if (!sup09(0x04)) calErr = Passport.NOT_SUPPORTED else {
-            cal = Passport.parseCalIds(ask("0904")); if (cal.isEmpty()) calErr = Passport.NO_RESPONSE
+            val r = mode09("0904") { Passport.parseCalIdsDetailed(it) }
+            if (r == null) calErr = Passport.NO_RESPONSE else { cal = r.value; calPart = r.partial }
         }
         var cvn = emptyList<String>(); var cvnErr: String? = null
         if (!sup09(0x06)) cvnErr = Passport.NOT_SUPPORTED else {
-            cvn = Passport.parseCvns(ask("0906")); if (cvn.isEmpty()) cvnErr = Passport.NO_RESPONSE
+            val r = mode09("0906") { raw -> Passport.parseCvns(raw).takeIf { it.isNotEmpty() }?.let { Parsed(it, false) } }
+            if (r == null) cvnErr = Passport.NO_RESPONSE else cvn = r.value
         }
-        var ecu = emptyList<String>(); var ecuErr: String? = null
+        var ecu = emptyList<String>(); var ecuErr: String? = null; var ecuPart = false
         if (!sup09(0x0A)) ecuErr = Passport.NOT_SUPPORTED else {
-            ecu = Passport.parseEcuNames(ask("090A")); if (ecu.isEmpty()) ecuErr = Passport.NO_RESPONSE
+            val r = mode09("090A") { Passport.parseEcuNamesDetailed(it) }
+            if (r == null) ecuErr = Passport.NO_RESPONSE else { ecu = r.value; ecuPart = r.partial }
         }
+        functional()
 
         // Mode 01 supported PIDs: 00, then 20/40/60/… while bit 32 of the previous range is set
         var pids: MutableList<Int>? = null; var pidsErr: String? = null
@@ -358,11 +440,10 @@ object PassportReader {
         }
         val pidList = pids?.distinct()?.sorted()
 
-        val rdyRaw = ask("0101")
-        val rdy = Passport.parseReadiness(rdyRaw)
+        val rdy = Passport.parseReadiness(ask("0101"))
         val rdyErr = if (rdy != null) null else if (pidList != null && !pidList.contains(1)) Passport.NOT_SUPPORTED else Passport.NO_RESPONSE
 
         return PassportData(nowMs, profileName, vin, vinErr, cal, calErr, cvn, cvnErr, ecu, ecuErr,
-            pidList, pidsErr, p09, rdy, rdyErr)
+            pidList, pidsErr, p09, rdy, rdyErr, vinPart, calPart, ecuPart, raw09.toList())
     }
 }

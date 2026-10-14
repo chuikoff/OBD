@@ -143,6 +143,9 @@ private fun SensorTechInfo(reading: SensorReading) {
         reading.rawValue?.let { Text("Сырой датчик: %.1f °C".format(it), style = small, color = dim) }
         reading.detail?.let { Text(it, style = small, color = dim) }
         if (kind != null) Text("Шкала: " + TempColorScale.legend(kind), style = small, color = dim)
+        if (reading.sensorId == "cvt_temp" && reading.statusLine == null) {
+            Text("Блокировка ГТ: — (нет данных 2103)", style = small, color = dim)
+        }
         reading.note?.let { Text("Источник: $it", style = small, color = dim) }
         reading.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error) }
         reading.rawHex?.let { Text("RAW: $it", style = small, fontFamily = FontFamily.Monospace) }
@@ -181,6 +184,16 @@ private fun ReadingCard(reading: SensorReading) {
                 color = valueColor ?: MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.alpha(if (reading.isStale) 0.55f else 1f)
             )
+            reading.statusLine?.let { line ->
+                Text(
+                    line,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = reading.statusArgb?.let { Color(it) }
+                        ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.alpha(if (reading.isStale) 0.55f else 1f)
+                )
+            }
             if (reading.value == null) {
                 Text(
                     "нет данных",

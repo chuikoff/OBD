@@ -204,6 +204,7 @@ class CvtTempSensor(
         payload: ByteArray
     ): SensorReading {
         val value = cmd.decode(payload)
+        val kin = if (cmd.request == "2103") CvtLockupDetector.sampleFrom2103(payload) else null
         return SensorReading(
             sensorId = id,
             displayName = displayNameRu,
@@ -212,7 +213,11 @@ class CvtTempSensor(
             rawHex = Elm327Parser.displayRaw(raw),
             note = noteFor(cmd),
             isPlaceholder = cmd.isPlaceholder,
-            error = if (value == null) "Декод не удался (байт 00/FF или вне −40…160 °C)" else null
+            error = if (value == null) "Декод не удался (байт 00/FF или вне −40…160 °C)" else null,
+            cvtPrimaryRpm = kin?.primaryRpm,
+            cvtSecondaryRpm = kin?.secondaryRpm,
+            cvtEngineRpm = kin?.engineRpm,
+            cvtEcuSlipByte = kin?.ecuSlipByte
         )
     }
 

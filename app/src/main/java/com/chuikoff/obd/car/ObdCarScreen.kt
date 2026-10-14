@@ -64,6 +64,7 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
                 Row.Builder()
                     .setTitle("CVT")
                     .addText(fmt(TempColorScale.Kind.CVT, snap.cvtC))
+                    .apply { snap.cvtLockup?.let { addText(it) } }
                     .build()
             )
             .addRow(

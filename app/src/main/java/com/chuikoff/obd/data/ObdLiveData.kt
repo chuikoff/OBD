@@ -20,6 +20,7 @@ object ObdLiveData {
         val cvtC: Double? = null,
         val ambientC: Double? = null,
         val ambientNote: String? = null,
+        val cvtLockup: String? = null,
         val updatedAtMs: Long = 0L
     )
 
@@ -33,6 +34,7 @@ object ObdLiveData {
     private const val K_CVT = "cvt"
     private const val K_AMBIENT = "ambient"
     private const val K_AMBIENT_NOTE = "ambient_note"
+    private const val K_CVT_LOCKUP = "cvt_lockup"
     private const val K_UPDATED = "updated"
 
     fun update(
@@ -42,6 +44,7 @@ object ObdLiveData {
         cvtC: Double?,
         ambientC: Double?,
         ambientNote: String? = null,
+        cvtLockup: String? = null,
         prefs: SharedPreferences? = null
     ) {
         val now = System.currentTimeMillis()
@@ -52,6 +55,7 @@ object ObdLiveData {
             cvtC = cvtC,
             ambientC = ambientC,
             ambientNote = ambientNote,
+            cvtLockup = cvtLockup,
             updatedAtMs = now
         )
         _snapshot.value = snap
@@ -62,6 +66,7 @@ object ObdLiveData {
             if (cvtC != null) putFloat(K_CVT, cvtC.toFloat()) else remove(K_CVT)
             if (ambientC != null) putFloat(K_AMBIENT, ambientC.toFloat()) else remove(K_AMBIENT)
             putString(K_AMBIENT_NOTE, ambientNote)
+            putString(K_CVT_LOCKUP, cvtLockup)
             putLong(K_UPDATED, now)
             apply()
         }
@@ -78,6 +83,7 @@ object ObdLiveData {
             cvtC = optFloat(K_CVT),
             ambientC = optFloat(K_AMBIENT),
             ambientNote = p.getString(K_AMBIENT_NOTE, null),
+            cvtLockup = p.getString(K_CVT_LOCKUP, null),
             updatedAtMs = p.getLong(K_UPDATED, 0L)
         )
         _snapshot.update { snap }

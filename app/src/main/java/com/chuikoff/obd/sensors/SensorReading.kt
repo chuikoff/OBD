@@ -15,5 +15,14 @@ data class SensorReading(
     /** Unfiltered sensor value when [value] is a display-filtered one (Outlander ambient). */
     val rawValue: Double? = null,
     /** Extra small line under the big number (e.g. «датчик: 24 °C (сырой…)»). */
-    val detail: String? = null
+    val detail: String? = null,
+    /** Compact status under the big number (e.g. «Блокировка ГТ: вкл») — shown on the card. */
+    val statusLine: String? = null,
+    /** ARGB for [statusLine]; null → theme default. */
+    val statusArgb: Long? = null,
+    /** CVT 2103 kinematics (Outlander) — filled by the sensor for the lock-up detector. */
+    val cvtPrimaryRpm: Int? = null,
+    val cvtSecondaryRpm: Int? = null,
+    val cvtEngineRpm: Int? = null,
+    val cvtEcuSlipByte: Int? = null
 )

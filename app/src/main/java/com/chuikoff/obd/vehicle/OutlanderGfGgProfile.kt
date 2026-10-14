@@ -4,6 +4,7 @@ import com.chuikoff.obd.elm327.Elm327Parser
 import com.chuikoff.obd.sensors.CoolantTempSensor
 import com.chuikoff.obd.sensors.CvtFormula
 import com.chuikoff.obd.sensors.CvtSettings
+import com.chuikoff.obd.sensors.CvtLockupDetector
 import com.chuikoff.obd.sensors.CvtTempSensor
 import com.chuikoff.obd.sensors.OutlanderAmbientTempSensor
 import com.chuikoff.obd.sensors.SensorDefinition
@@ -93,7 +94,12 @@ class OutlanderGfGgProfile : VehicleProfile {
             }
             val a = u(0); val b = u(1); val c = u(2); val e = u(4)
             if (a != null && b != null && c != null) {
-                sb.append(" | перв ${(a - 2) * 32} / втор ${(b - 2) * 64} / двиг ${c * 32} об/мин")
+                val prim = (a - 2) * 32; val sec = (b - 2) * 64; val eng = c * 32
+                sb.append(" | перв $prim / втор $sec / двиг $eng об/мин · slip ${eng - prim}")
+            }
+            u(3)?.let { d ->
+                val signed = if (d > 127) d - 256 else d
+                sb.append(" · SIGNED(D)=$signed")
             }
             if (e != null) sb.append(String.format(Locale.US, " · ratio %.2f", e / 100.0))
             return sb.toString()

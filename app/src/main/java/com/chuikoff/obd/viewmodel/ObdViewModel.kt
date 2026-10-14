@@ -20,6 +20,7 @@ import com.chuikoff.obd.sensors.CvtDebugEntry
 import com.chuikoff.obd.sensors.CvtDebugLog
 import com.chuikoff.obd.sensors.CvtFormula
 import com.chuikoff.obd.sensors.CvtSettings
+import com.chuikoff.obd.sensors.CvtLockupDetector
 import com.chuikoff.obd.sensors.CvtTempSmoother
 import com.chuikoff.obd.sensors.SensorReading
 import com.chuikoff.obd.sensors.VehicleSpeedReader
@@ -87,6 +88,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     private var consecutiveHardFailures = 0
     private var reconnectUsedThisSession = false
     private val cvtTempSmoother = CvtTempSmoother()
+    private val cvtLockup = CvtLockupDetector()
 
     /** Outlander ambient: cluster-like filter over raw AWC byte 8, persisted across sessions. */
     private val ambientPrefs = app.getSharedPreferences("ambient_filter", android.content.Context.MODE_PRIVATE)
@@ -295,6 +297,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             reconnectUsedThisSession = false
             consecutiveHardFailures = 0
             cvtTempSmoother.reset()
+            cvtLockup.reset()
+            lastCvtStatusLine = null
+            lastCvtStatusArgb = null
             resetAmbient()
             _ui.update {
                 it.copy(
@@ -382,6 +387,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             elm = null
             consecutiveHardFailures = 0
             cvtTempSmoother.reset()
+            cvtLockup.reset()
+            lastCvtStatusLine = null
+            lastCvtStatusArgb = null
             resetAmbient()
             _ui.update {
                 it.copy(
@@ -564,7 +572,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     val outlander = _ui.value.selectedProfile.id == OUTLANDER_PROFILE_ID
                     val smoothed = results.map { r ->
                         when {
-                            r.sensorId == "cvt_temp" -> cvtTempSmoother.apply(r)
+                            r.sensorId == "cvt_temp" -> applyCvt(r)
                             r.sensorId == "ambient_temp" && outlander -> applyAmbientFilter(client, r)
                             else -> r
                         }
@@ -677,6 +685,33 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
      * above the shown value (the only case where speed matters), at most every 5 s; the engine
      * header is already restored by the AWC sensor, so it is a single short request.
      */
+    private var lastCvtStatusLine: String? = null
+    private var lastCvtStatusArgb: Long? = null
+
+    private fun applyCvt(r: SensorReading): SensorReading {
+        val smoothed = cvtTempSmoother.apply(r)
+        val sample = if (smoothed.cvtPrimaryRpm != null && smoothed.cvtEngineRpm != null) {
+            CvtLockupDetector.Sample(
+                smoothed.cvtPrimaryRpm!!,
+                smoothed.cvtSecondaryRpm ?: 0,
+                smoothed.cvtEngineRpm!!,
+                smoothed.cvtEcuSlipByte
+            )
+        } else null
+        if (smoothed.isStale && sample == null) {
+            return smoothed.copy(statusLine = lastCvtStatusLine, statusArgb = lastCvtStatusArgb)
+        }
+        val out = cvtLockup.update(sample)
+        lastCvtStatusLine = out.cardLine
+        lastCvtStatusArgb = out.state.argb
+        return smoothed.copy(
+            statusLine = out.cardLine,
+            statusArgb = out.state.argb,
+            detail = listOfNotNull(smoothed.detail, out.techLine, CvtLockupDetector.EXPLAIN_RU)
+                .joinToString("\n")
+        )
+    }
+
     private suspend fun applyAmbientFilter(client: Elm327Client, r: SensorReading): SensorReading {
         val raw = r.rawValue ?: r.value
         val now = System.currentTimeMillis()
@@ -749,7 +784,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             coolantC = coolant?.value,
             cvtC = cvt?.value,
             ambientC = ambient?.value,
-            ambientNote = ambient?.note
+            ambientNote = ambient?.note,
+            cvtLockup = cvt?.statusLine
         )
     }
 
@@ -759,7 +795,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         coolantC: Double? = ObdLiveData.snapshot.value.coolantC,
         cvtC: Double? = ObdLiveData.snapshot.value.cvtC,
         ambientC: Double? = ObdLiveData.snapshot.value.ambientC,
-        ambientNote: String? = ObdLiveData.snapshot.value.ambientNote
+        ambientNote: String? = ObdLiveData.snapshot.value.ambientNote,
+        cvtLockup: String? = ObdLiveData.snapshot.value.cvtLockup
     ) {
         ObdLiveData.update(
             connected = connected,
@@ -768,6 +805,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             cvtC = cvtC,
             ambientC = ambientC,
             ambientNote = ambientNote,
+            cvtLockup = cvtLockup,
             prefs = livePrefs
         )
     }

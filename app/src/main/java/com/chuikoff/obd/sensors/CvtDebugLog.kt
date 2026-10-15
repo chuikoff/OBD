@@ -84,3 +84,19 @@ object CvtDebugLog {
         }
     }
 }
+
+
+/**
+ * Cross-cycle pacing for CVT reads: short timeouts after a healthy streak, and optionally
+ * leave the adapter on TCM addressing so the next CVT-only tick skips post/restore.
+ */
+object CvtPollPace {
+    @Volatile var consecutiveOk: Int = 0
+        private set
+    /** When true, [CvtTempSensor] skips postCommands + engine restore (next tick is CVT again). */
+    @Volatile var skipPostRestore: Boolean = false
+
+    fun markOk() { consecutiveOk = (consecutiveOk + 1).coerceAtMost(100) }
+    fun markBad() { consecutiveOk = 0 }
+    fun reset() { consecutiveOk = 0; skipPostRestore = false }
+}

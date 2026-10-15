@@ -14,17 +14,19 @@ import kotlin.math.abs
  * No verified «lock-up ON/OFF» status bit was found in 2103 / 2102 / 2104. Mutual service-manual
  * lock-up items (MUT-III 30/31, PID 2105 LU solenoid current) need a second TCM request —
  * out of scope. State is inferred from slip = engine − primary:
- *  - «вкл» when primary > 0, engine > [minEngineRpm] and |slip| ≤ [lockMaxSlip] for [lockPolls] polls
+ *  - «вкл» when primary > 0, engine > [minEngineRpm] and |slip| ≤ 32 (1 poll) or ≤ 64 (2 polls)
  *  - «выкл (стоим)» when primary == 0
  *  - «выкл» when slip > [unlockMinSlip] (or after leaving lock without meeting lock criteria)
  *
  * Thresholds sit above the 32-rpm quantization: 64 ≈ 2 steps, 160 ≈ 5 steps.
  */
 class CvtLockupDetector(
+    /** Instant lock when |slip| is within one primary-rpm quantum (32). */
+    private val lockMaxSlipTight: Int = 32,
     private val lockMaxSlip: Int = 64,
     private val unlockMinSlip: Int = 160,
     private val minEngineRpm: Int = 900,
-    private val lockPolls: Int = 2
+    private val lockPollsBorder: Int = 2
 ) {
     enum class State(val labelRu: String, val argb: Long) {
         LOCKED("вкл", 0xFF43A047),            // green
@@ -76,7 +78,8 @@ class CvtLockupDetector(
             }
             abs(slip) <= lockMaxSlip && sample.engineRpm > minEngineRpm -> {
                 lowSlipStreak++
-                if (lowSlipStreak >= lockPolls) state = State.LOCKED
+                val need = if (abs(slip) <= lockMaxSlipTight) 1 else lockPollsBorder
+                if (lowSlipStreak >= need) state = State.LOCKED
                 // else keep previous (UNKNOWN / UNLOCKED / IDLE) until confirmed
             }
             slip > unlockMinSlip -> {
@@ -100,7 +103,7 @@ class CvtLockupDetector(
     companion object {
         const val METHOD = "по проскальзыванию (двиг − перв. шкив) из 2103"
         const val THRESHOLDS =
-            "вкл: |slip|≤64 об/мин × 2 опроса, двиг>900; выкл: slip>160 или перв=0"
+            "вкл: |slip|≤32 → 1 опрос, 33–64 → 2 опроса, двиг>900; выкл: slip>160 или перв=0"
         const val EXPLAIN_RU =
             "Блокировка ГТ (lock-up) — смыкание сцепления гидротрансформатора: двигатель и " +
                 "первичный шкив CVT вращаются почти одинаково, меньше нагрев масла и расход. " +

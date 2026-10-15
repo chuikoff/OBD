@@ -119,7 +119,7 @@ class OutlanderGfGgProfile : VehicleProfile {
             parseMode = CvtTempCommand.ParseMode.MODE21,
             preCommands = listOf(
                 "ATAT1",
-                "ATST32",
+                "ATST16",
                 "ATSH7E1",
                 "ATFCSH7E1",
                 "ATFCSD30080A",
@@ -146,15 +146,16 @@ class OutlanderGfGgProfile : VehicleProfile {
     override fun cvtTempCommand(): CvtTempCommand = OUT3_CVT
 
     override fun sensors(): List<SensorDefinition> = listOf(
-        CoolantTempSensor(),
+        // CVT first — lock-up / temp refresh as often as the bus allows
         CvtTempSensor(
             commandProvider = { cvtTempCommand() },
             displayNameRu = "Температура CVT",
             // N is index 13 → need ≥14 data bytes at their true offsets
             minMode21DataBytes = CVT_BYTE_INDEX + 1,
-            retryTimeoutMs = 6000,
-            maxRetries = 2
+            retryTimeoutMs = 4000,
+            maxRetries = 1
         ),
+        CoolantTempSensor(),
         OutlanderAmbientTempSensor()
     )
 }

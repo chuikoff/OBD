@@ -21,7 +21,7 @@ class CvtTempSensor(
     override val displayNameRu: String = "Температура CVT",
     /** Minimum data bytes after Mode 21 marker that must be present at true offsets. */
     private val minMode21DataBytes: Int = 14,
-    private val retryTimeoutMs: Long = 6000,
+    private val retryTimeoutMs: Long = 4000,
     /** Extra attempts after the first send on invalid frame. */
     private val maxRetries: Int = 1
 ) : SensorDefinition {
@@ -33,21 +33,24 @@ class CvtTempSensor(
     override suspend fun read(client: Elm327Client): SensorReading {
         val cmd = commandProvider()
         var rawForError: String? = null
+        val healthy = CvtPollPace.consecutiveOk >= 2
+        val firstTimeout = if (healthy) 2500L else 4000L
         return try {
-            runCatching { client.flushReadBuffer() }
+            // Flush only when the previous frame was bad — CR+drain costs ~0.5–1 s on clones
+            if (!healthy) runCatching { client.flushReadBuffer(timeoutMs = 400) }
 
             for (pre in cmd.preCommands) {
-                client.send(pre, timeoutMs = 2000)
+                client.send(pre, timeoutMs = 1500)
             }
 
-            var raw = client.send(cmd.request, timeoutMs = 5000)
+            var raw = client.send(cmd.request, timeoutMs = firstTimeout)
             rawForError = raw
             var parsed = parseAndDecode(cmd, raw)
 
             var attempt = 0
             while ((parsed == null || parsed.value == null) && attempt < maxRetries) {
                 attempt++
-                runCatching { client.flushReadBuffer() }
+                runCatching { client.flushReadBuffer(timeoutMs = 400) }
                 raw = client.send(cmd.request, timeoutMs = retryTimeoutMs)
                 rawForError = raw
                 parsed = parseAndDecode(cmd, raw)
@@ -56,11 +59,14 @@ class CvtTempSensor(
             if (CvtSettings.debugExtraRequests) {
                 for (dbg in cmd.debugRequests) {
                     runCatching {
-                        val r = client.send(dbg.request, timeoutMs = 4000)
+                        val r = client.send(dbg.request, timeoutMs = 3000)
                         logDebugExtra(dbg, r)
                     }
                 }
             }
+
+            val ok = parsed?.value != null
+            if (ok) CvtPollPace.markOk() else CvtPollPace.markBad()
 
             parsed ?: SensorReading(
                 sensorId = id,
@@ -73,6 +79,7 @@ class CvtTempSensor(
                 error = "Нет данных — ECU не ответил / кадр неполный (raw для отладки)"
             )
         } catch (e: Exception) {
+            CvtPollPace.markBad()
             SensorReading(
                 sensorId = id,
                 displayName = displayNameRu,
@@ -84,10 +91,13 @@ class CvtTempSensor(
                 error = e.message ?: "Ошибка чтения"
             )
         } finally {
-            for (post in cmd.postCommands) {
-                runCatching { client.send(post, timeoutMs = 2000) }
+            // Stay on TCM when the poll loop will ask CVT again immediately (CVT-only tick)
+            if (!CvtPollPace.skipPostRestore) {
+                for (post in cmd.postCommands) {
+                    runCatching { client.send(post, timeoutMs = 1500) }
+                }
+                runCatching { client.restoreEngineEcuFilter() }
             }
-            runCatching { client.restoreEngineEcuFilter() }
         }
     }
 

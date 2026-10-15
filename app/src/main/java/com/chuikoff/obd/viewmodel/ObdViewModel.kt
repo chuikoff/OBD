@@ -21,6 +21,7 @@ import com.chuikoff.obd.sensors.CvtDebugLog
 import com.chuikoff.obd.sensors.CvtFormula
 import com.chuikoff.obd.sensors.CvtSettings
 import com.chuikoff.obd.sensors.CvtLockupDetector
+import com.chuikoff.obd.sensors.CvtPollPace
 import com.chuikoff.obd.sensors.CvtTempSmoother
 import com.chuikoff.obd.sensors.SensorReading
 import com.chuikoff.obd.sensors.VehicleSpeedReader
@@ -298,6 +299,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             consecutiveHardFailures = 0
             cvtTempSmoother.reset()
             cvtLockup.reset()
+            CvtPollPace.reset()
             lastCvtStatusLine = null
             lastCvtStatusArgb = null
             resetAmbient()
@@ -388,6 +390,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             consecutiveHardFailures = 0
             cvtTempSmoother.reset()
             cvtLockup.reset()
+            CvtPollPace.reset()
             lastCvtStatusLine = null
             lastCvtStatusArgb = null
             resetAmbient()
@@ -540,8 +543,12 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private var pollTick = 0
+
     private fun startPolling() {
         pollJob?.cancel()
+        pollTick = 0
+        CvtPollPace.reset()
         pollJob = viewModelScope.launch {
             _ui.update { it.copy(isPolling = true) }
             startMonitorService()
@@ -552,8 +559,24 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     continue
                 }
                 try {
-                    val sensors = _ui.value.selectedProfile.sensors()
-                    val results = mutableListOf<SensorReading>()
+                    pollTick++
+                    val profile = _ui.value.selectedProfile
+                    val outlander = profile.id == OUTLANDER_PROFILE_ID
+                    val all = profile.sensors()
+                    // Outlander: CVT every tick; coolant every 2nd; ambient every 3rd.
+                    // CVT-only ticks stay on TCM (skipPostRestore) → ~0.7–1.5 s lock-up refresh.
+                    val sensors = if (outlander) {
+                        val want = linkedSetOf("cvt_temp")
+                        if (pollTick % 2 == 0) want += "coolant_temp"
+                        if (pollTick % 3 == 0) want += "ambient_temp"
+                        all.filter { it.id in want }.sortedBy {
+                            when (it.id) { "cvt_temp" -> 0; "coolant_temp" -> 1; else -> 2 }
+                        }
+                    } else all
+                    val cvtOnly = outlander && sensors.size == 1 && sensors[0].id == "cvt_temp"
+                    CvtPollPace.skipPostRestore = cvtOnly
+
+                    val byId = _ui.value.readings.associateBy { it.sensorId }.toMutableMap()
                     for (sensor in sensors) {
                         val reading = try {
                             sensor.read(client)
@@ -566,24 +589,38 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                                 error = e.message ?: "Ошибка чтения"
                             )
                         }
-                        results += reading
-                    }
-                    consecutiveHardFailures = 0
-                    val outlander = _ui.value.selectedProfile.id == OUTLANDER_PROFILE_ID
-                    val smoothed = results.map { r ->
-                        when {
-                            r.sensorId == "cvt_temp" -> applyCvt(r)
-                            r.sensorId == "ambient_temp" && outlander -> applyAmbientFilter(client, r)
-                            else -> r
+                        val applied = when {
+                            reading.sensorId == "cvt_temp" -> applyCvt(reading)
+                            reading.sensorId == "ambient_temp" && outlander ->
+                                applyAmbientFilter(client, reading)
+                            else -> reading
+                        }
+                        byId[applied.sensorId] = applied
+                        // Push CVT/lock-up to UI immediately — don't wait for coolant/ambient
+                        if (applied.sensorId == "cvt_temp") {
+                            val snap = orderReadings(all, byId)
+                            _ui.update {
+                                it.copy(readings = snap, statusMessage = "Опрос датчиков")
+                            }
+                            publishLiveFromReadings(snap, connected = true)
                         }
                     }
+                    consecutiveHardFailures = 0
+                    CvtPollPace.skipPostRestore = false
+                    val smoothed = orderReadings(all, byId)
                     _ui.update {
                         it.copy(readings = smoothed, statusMessage = "Опрос датчиков")
                     }
                     publishLiveFromReadings(smoothed, connected = true)
-                    delay(if (sensors.any { it.id == "cvt_temp" }) 1600L else 1000L)
+                    // Short gap after CVT-only; a bit more after a full mix so the clone can breathe
+                    delay(when {
+                        cvtOnly -> 250L
+                        outlander -> 500L
+                        else -> 800L
+                    })
                 } catch (e: Exception) {
                     // Soft recover: keep loop alive, but do not fake/hold stale readings
+                    CvtPollPace.reset()
                     consecutiveHardFailures++
                     val msg = e.message ?: "сбой цикла"
                     _ui.update {
@@ -629,6 +666,12 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** Keep profile sensor order when merging a partial poll into the last full snapshot. */
+    private fun orderReadings(
+        all: List<com.chuikoff.obd.sensors.SensorDefinition>,
+        byId: Map<String, SensorReading>
+    ): List<SensorReading> = all.mapNotNull { byId[it.id] }
 
 
     /** Disconnect + connect last address once. Returns true on success. */

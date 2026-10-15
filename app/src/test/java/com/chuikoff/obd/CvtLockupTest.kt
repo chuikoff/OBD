@@ -47,16 +47,20 @@ class CvtLockupTest {
         assertEquals("выкл (стоим)", d.update(s(0, 672)).state.labelRu)
     }
 
-    @Test fun locksAfterTwoLowSlipPolls() {
+    @Test fun locksAfterOneTightOrTwoBorderPolls() {
         val d = CvtLockupDetector()
-        val locked = s(1856, 1856) // slip 0
-        assertEquals(State.UNKNOWN, d.update(locked).state) // 1st poll — not yet
-        val r = d.update(locked)
+        // |slip|=0 ≤32 → вкл on the first poll
+        val r = d.update(s(1856, 1856))
         assertEquals(State.LOCKED, r.state)
         assertEquals("Блокировка ГТ: вкл", r.cardLine)
         assertTrue(r.techLine.contains("slip 0"))
         assertTrue(r.techLine.contains("по проскальзыванию"))
-        // stays locked on small residual slip within lockMaxSlip (64)
+        // stays locked on residual slip within tight band
+        assertEquals(State.LOCKED, d.update(s(1856, 1856 + 32)).state)
+
+        // Borderline |slip|=64 needs 2 polls after unlock
+        d.reset()
+        assertEquals(State.UNKNOWN, d.update(s(1856, 1856 + 64)).state) // 1st border — not yet
         assertEquals(State.LOCKED, d.update(s(1856, 1856 + 64)).state)
     }
 
@@ -68,8 +72,7 @@ class CvtLockupTest {
         assertEquals(State.LOCKED, d.update(s(1152, 1248)).state)
         // slip 672 — unlock
         assertEquals(State.UNLOCKED, d.update(s(1248, 1920)).state)
-        // back to low slip: needs 2 polls again
-        assertEquals(State.UNLOCKED, d.update(s(1856, 1856)).state)
+        // back to low slip (|slip|=0 ≤32): locks on the first poll
         assertEquals(State.LOCKED, d.update(s(1856, 1856)).state)
     }
 

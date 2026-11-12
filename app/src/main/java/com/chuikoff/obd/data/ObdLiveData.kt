@@ -19,7 +19,16 @@ object ObdLiveData {
         val ambientC: Double? = null,
         val ambientNote: String? = null,
         val cvtLockup: String? = null,
+        val engine: EngineLive? = null,
         val updatedAtMs: Long = 0L
+    )
+
+    /** Extra engine values as already formatted on the phone card. */
+    data class EngineLive(
+        val voltageText: String?,
+        val voltageArgb: Long?,
+        val rpmText: String?,
+        val fuelText: String?
     )
 
     private val _snapshot = MutableStateFlow(Snapshot())
@@ -32,7 +41,8 @@ object ObdLiveData {
         cvtC: Double?,
         ambientC: Double?,
         ambientNote: String? = null,
-        cvtLockup: String? = null
+        cvtLockup: String? = null,
+        engine: EngineLive? = null
     ) {
         val now = System.currentTimeMillis()
         val snap = Snapshot(
@@ -43,6 +53,7 @@ object ObdLiveData {
             ambientC = ambientC,
             ambientNote = ambientNote,
             cvtLockup = cvtLockup,
+            engine = engine,
             updatedAtMs = now
         )
         _snapshot.value = snap

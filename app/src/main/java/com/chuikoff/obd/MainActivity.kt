@@ -8,7 +8,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -31,24 +30,31 @@ import com.chuikoff.obd.ui.screens.PassportScreen
 import com.chuikoff.obd.ui.screens.ProfileScreen
 import com.chuikoff.obd.ui.screens.ReadingsScreen
 import com.chuikoff.obd.ui.theme.ObdTheme
-import com.chuikoff.obd.viewmodel.ObdViewModel
+import com.chuikoff.obd.viewmodel.ObdController
+import com.chuikoff.obd.connection.AutoTrigger
 
 class MainActivity : ComponentActivity() {
 
-    private val vm: ObdViewModel by viewModels()
+    private val vm: ObdController by lazy { ObdController.get(this) }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { /* UI will re-enable actions after grant */ }
+    ) { vm.autoConnect(AutoTrigger.APP_START) } // just granted «Устройства поблизости» → try now
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ensurePermissions()
+        if (savedInstanceState == null) vm.autoConnect(AutoTrigger.APP_START)
         setContent {
             ObdTheme {
                 ObdApp(vm, onEnsurePermissions = ::ensurePermissions)
             }
         }
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) vm.onUiDestroyed()
+        super.onDestroy()
     }
 
     private fun ensurePermissions() {
@@ -86,7 +92,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
+fun ObdApp(vm: ObdController, onEnsurePermissions: () -> Unit = {}) {
     val state by vm.ui.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
 
@@ -165,8 +171,16 @@ fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
                     onRead = vm::readDtcs,
                     onClearConfirmed = { vm.clearDtcs(confirmed = true) }
                 )
-                3 -> PassportScreen(state, onRefresh = vm::readPassport, exportText = vm::passportExportText)
-                else -> ProfileScreen(state, onSelect = vm::selectProfile)
+                3 -> PassportScreen(state, onRefresh = vm::readPassport, exportText = vm::passportExportText,
+                    onReadCvtOil = vm::readCvtOil)
+                else -> ProfileScreen(
+                    state,
+                    onSelect = vm::selectProfile,
+                    onAlertSettings = vm::setAlertSettings,
+                    onTestAlert = vm::testAlert,
+                    onAutoConnect = vm::setAutoConnect,
+                    onAutoConnectBluetooth = vm::setAutoConnectOnBluetooth
+                )
             }
         }
     }

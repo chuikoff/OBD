@@ -125,8 +125,31 @@ private fun DiagnosticsBlock(
                     Spacer(Modifier.height(8.dp))
                     SensorTechInfo(r)
                 }
+                if (showCvtDebug) {
+                    Spacer(Modifier.height(8.dp))
+                    CvtOilTechInfo(state.cvtOilAttempt ?: state.cvtOil)
+                }
             }
         }
+    }
+}
+
+/** EXPERIMENTAL 2110: every decode candidate + exact raw, to confirm the right bytes in the car. */
+@Composable
+private fun CvtOilTechInfo(r: com.chuikoff.obd.sensors.CvtOilDegradation.Result?) {
+    val small = MaterialTheme.typography.labelSmall
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
+    Column {
+        Text("Деградация масла CVT (2110 @7E1, экспериментально)", style = MaterialTheme.typography.titleSmall)
+        if (r == null) {
+            Text("Ещё не читалось (читается раз за подключение, ~30 с после старта, или кнопкой на вкладке «Авто»)", style = small, color = dim)
+            return@Column
+        }
+        Text("Показано: ${r.value ?: "—"} · ${r.source}", style = small, color = dim)
+        Text("Варианты: ${r.candidatesText}", style = small, color = dim, fontFamily = FontFamily.Monospace)
+        r.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error) }
+        r.payloadHex?.let { Text("Данные после 61 10: $it", style = small, fontFamily = FontFamily.Monospace) }
+        if (r.rawVisible.isNotBlank()) Text("RAW: ${r.rawVisible}", style = small, fontFamily = FontFamily.Monospace)
     }
 }
 
@@ -155,7 +178,7 @@ private fun ReadingCard(reading: SensorReading) {
     // No color for "—": band only when a value is actually shown
     val band = if (kind != null && reading.value != null)
         TempColorScale.band(kind, reading.value) else null
-    val valueColor = band?.let { Color(it.argb) }
+    val valueColor = (band?.argb ?: reading.valueArgb)?.let { Color(it) }
     val cardTint = when {
         valueColor != null -> valueColor.copy(alpha = 0.12f)
         else -> MaterialTheme.colorScheme.surfaceVariant
@@ -170,6 +193,7 @@ private fun ReadingCard(reading: SensorReading) {
             Spacer(Modifier.height(4.dp))
             val valueText = when {
                 reading.value == null -> "—"
+                reading.displayText != null -> reading.displayText
                 kind != null -> TempColorScale.valueText(kind, reading.value, reading.unit)
                 else -> String.format("%.0f %s", reading.value, reading.unit)
             }

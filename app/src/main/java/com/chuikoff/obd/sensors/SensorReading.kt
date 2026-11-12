@@ -23,5 +23,9 @@ data class SensorReading(
     val cvtPrimaryRpm: Int? = null,
     val cvtSecondaryRpm: Int? = null,
     val cvtEngineRpm: Int? = null,
-    val cvtEcuSlipByte: Int? = null
+    val cvtEcuSlipByte: Int? = null,
+    /** Ready-made value text for non-temperature cards («12.6 В», «850 об/мин»). */
+    val displayText: String? = null,
+    /** Value color for non-temperature cards (voltage scale); null = neutral. */
+    val valueArgb: Long? = null
 )

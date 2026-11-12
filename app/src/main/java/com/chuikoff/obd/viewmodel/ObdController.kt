@@ -2,9 +2,16 @@ package com.chuikoff.obd.viewmodel
 
 import android.app.Application
 import android.bluetooth.le.ScanCallback
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
+import com.chuikoff.obd.alerts.AlertEngine
+import com.chuikoff.obd.alerts.AlertNotifier
+import com.chuikoff.obd.alerts.AlertSettings
+import com.chuikoff.obd.connection.AutoConnectPolicy
+import com.chuikoff.obd.connection.AutoTrigger
+import com.chuikoff.obd.connection.IgnitionWatch
+import com.chuikoff.obd.connection.LastAdapter
 import com.chuikoff.obd.connection.BleTransport
+import com.chuikoff.obd.sensors.CvtOilDegradation
+import com.chuikoff.obd.sensors.EngineExtras
 import com.chuikoff.obd.connection.BluetoothClassicTransport
 import com.chuikoff.obd.connection.DiscoveredDevice
 import com.chuikoff.obd.connection.ObdTransport
@@ -29,7 +36,11 @@ import com.chuikoff.obd.sensors.VehicleSpeedReader
 import com.chuikoff.obd.service.ObdMonitorService
 import com.chuikoff.obd.vehicle.VehicleProfile
 import com.chuikoff.obd.vehicle.VehicleProfileRegistry
+import android.content.Context
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -69,7 +80,18 @@ data class ObdUiState(
     // Vehicle passport («Авто»)
     val passport: PassportData? = null,
     val passportBusy: Boolean = false,
-    val passportStatus: String? = null
+    val passportStatus: String? = null,
+    // 1.14: alerts, auto-connect, CVT oil degradation (experimental)
+    val alertSettings: AlertSettings = AlertSettings(),
+    val autoConnect: Boolean = true,
+    val autoConnectOnBluetooth: Boolean = true,
+    val lastAdapter: LastAdapter? = null,
+    /** Last successful 2110 read (persisted). */
+    val cvtOil: CvtOilDegradation.Result? = null,
+    /** Last 2110 attempt, also failed ones (raw for «Диагностика»). */
+    val cvtOilAttempt: CvtOilDegradation.Result? = null,
+    val cvtOilBusy: Boolean = false,
+    val cvtOilStatus: String? = null
 )
 
 sealed class ConnectionState {
@@ -78,7 +100,13 @@ sealed class ConnectionState {
     data object Connected : ConnectionState()
 }
 
-class ObdViewModel(app: Application) : AndroidViewModel(app) {
+/**
+ * Connection + polling for the whole process (not tied to the Activity), so Android Auto and the
+ * Bluetooth auto-connect receiver can start a session without the phone UI. One instance: [get].
+ */
+class ObdController private constructor(private val app: Application) {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val classic = BluetoothClassicTransport(app)
     private val ble = BleTransport(app)
@@ -113,8 +141,19 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     val ui: StateFlow<ObdUiState> = _ui.asStateFlow()
 
     private val cvtPrefs = app.getSharedPreferences("cvt_settings", android.content.Context.MODE_PRIVATE)
+    private val settingsPrefs = app.getSharedPreferences("app_settings", android.content.Context.MODE_PRIVATE)
 
-    private val poller = Poller(viewModelScope, object : Poller.Host {
+    private val alertEngine = AlertEngine()
+    private val lastAlertSampleTs = mutableMapOf<String, Long>()
+    private val engineExtras = EngineExtras()
+    private val ignition = IgnitionWatch()
+    private var autoJob: Job? = null
+    private var lastAutoAttemptMs: Long? = null
+    private var manualDisconnectAtMs: Long? = null
+    private var connectedAtMs = 0L
+    private var oilReadThisConnection = false
+
+    private val poller = Poller(scope, object : Poller.Host {
         override val client: Elm327Client? get() = elm
         override val profile: VehicleProfile get() = _ui.value.selectedProfile
         override fun transportAlive(): Boolean = activeTransport?.isConnected?.value == true
@@ -128,6 +167,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         override fun publish(readings: List<SensorReading>) {
             _ui.update { it.copy(readings = readings, statusMessage = "Опрос датчиков") }
             publishLiveFromReadings(readings, connected = true)
+            onPublished(readings)
         }
         override fun tickFailed(message: String) {
             _ui.update {
@@ -138,7 +178,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             publishLive(connected = true, status = "ошибка опроса, переподключение…",
-                coolantC = null, cvtC = null, ambientC = null, ambientNote = null, cvtLockup = null)
+                coolantC = null, cvtC = null, ambientC = null, ambientNote = null, cvtLockup = null, engine = null)
+            checkIgnition(ecuAnswered = false)
         }
         override suspend fun reconnect(attempt: Int, reason: String): Boolean = reconnectSameDevice(attempt, reason)
         override fun reconnectGaveUp(reason: String) = onReconnectGaveUp(reason)
@@ -147,6 +188,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             if (running) startMonitorService()
         }
         override fun canResume(): Boolean = _ui.value.connectionState is ConnectionState.Connected
+        override fun extraSensors() = engineExtras.sensors()
     })
 
     init {
@@ -157,15 +199,24 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         CvtSettings.formula = formula
         CvtSettings.debugExtraRequests = extra
         val cachedPassport = Passport.deserialize(
-            getApplication<Application>().getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
+            app.getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
                 .getString("data", null)
         )
-        _ui.update { it.copy(cvtFormula = formula, cvtDebugExtra = extra, passport = cachedPassport) }
-        viewModelScope.launch {
+        _ui.update {
+            it.copy(
+                cvtFormula = formula, cvtDebugExtra = extra, passport = cachedPassport,
+                alertSettings = loadAlertSettings(),
+                autoConnect = settingsPrefs.getBoolean(K_AUTO, true),
+                autoConnectOnBluetooth = settingsPrefs.getBoolean(K_AUTO_BT, true),
+                lastAdapter = loadLastAdapter(),
+                cvtOil = CvtOilDegradation.deserialize(settingsPrefs.getString(K_OIL, null))
+            )
+        }
+        scope.launch {
             CvtDebugLog.entries.collect { list -> _ui.update { it.copy(cvtLog = list) } }
         }
         // «Стоп» in the foreground-service notification really disconnects
-        viewModelScope.launch {
+        scope.launch {
             ObdMonitorService.stopRequests.collect { disconnect() }
         }
     }
@@ -215,7 +266,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (busExclusive()) return
         _ui.update { it.copy(passportBusy = true, passportStatus = "Чтение паспорта…") }
-        viewModelScope.launch {
+        scope.launch {
             try {
                 poller.paused(client) {
                     client.tolerateNoData = true
@@ -229,7 +280,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                             _ui.value.selectedProfile.displayNameRu,
                             System.currentTimeMillis()
                         ) { cmd, t -> client.send(cmd, timeoutMs = t) }
-                        getApplication<Application>().getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
+                        app.getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
                             .edit().putString("data", Passport.serialize(data)).apply()
                         _ui.update { it.copy(passport = data, passportStatus = "Обновлено") }
                     } finally {
@@ -250,7 +301,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** DTC and passport reads share the bus: only one at a time (the buttons of the other tab stay enabled). */
-    private fun busExclusive(): Boolean = _ui.value.dtcBusy || _ui.value.passportBusy
+    private fun busExclusive(): Boolean = _ui.value.dtcBusy || _ui.value.passportBusy || _ui.value.cvtOilBusy
 
     fun passportExportText(): String =
         _ui.value.passport?.let { Passport.toText(it, com.chuikoff.obd.BuildConfig.VERSION_NAME) } ?: ""
@@ -327,7 +378,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                         it.copy(isScanning = false, errorMessage = "BLE сканер недоступен")
                     }
                 } else {
-                    viewModelScope.launch {
+                    scope.launch {
                         delay(12_000)
                         stopScan()
                     }
@@ -343,8 +394,14 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun connect(device: DiscoveredDevice) {
+        autoJob?.cancel()
+        autoJob = null
         connectJob?.cancel()
-        connectJob = viewModelScope.launch {
+        connectJob = scope.launch { doConnect(device, auto = false) }
+    }
+
+    private suspend fun doConnect(device: DiscoveredDevice, auto: Boolean) {
+        run {
             stopScan()
             poller.stop()
             cvtTempSmoother.reset()
@@ -392,12 +449,22 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 activeTransport = transport
                 elm = Elm327Client(transport).also { watchLink(it) }
                 elm!!.ensureInitialized()
+                engineExtras.reset(readSupportedPids(elm!!))
+                val last = LastAdapter(device.address, device.name, usedType)
+                saveLastAdapter(last)
+                alertEngine.resetTrip()
+                lastAlertSampleTs.clear()
+                oilReadThisConnection = false
+                connectedAtMs = System.currentTimeMillis()
+                ignition.start(connectedAtMs)
                 _ui.update {
                     it.copy(
                         connectionState = ConnectionState.Connected,
                         connectedAddress = device.address,
                         preferredTransport = usedType,
-                        statusMessage = "ELM327 готов (${transport.name})",
+                        lastAdapter = last,
+                        errorMessage = null,
+                        statusMessage = "ELM327 готов (${transport.name})" + if (auto) " — автоподключение" else "",
                         dtcScanned = false,
                         dtcCodes = emptyList(),
                         dtcPending = emptyList()
@@ -429,7 +496,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         connectionState = ConnectionState.Disconnected,
                         connectedAddress = null,
-                        errorMessage = msg
+                        // auto attempts: no red banner, the auto-connect status line explains
+                        errorMessage = if (auto) null else msg,
+                        statusMessage = if (auto) "Автоподключение: $msg" else it.statusMessage
                     )
                 }
                 publishLive(connected = false, status = msg)
@@ -438,8 +507,16 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        manualDisconnectAtMs = System.currentTimeMillis()
+        autoJob?.cancel()
+        autoJob = null
+        disconnectInternal()
+    }
+
+    private fun disconnectInternal(status: String = "Отключено", error: String? = null) {
         connectJob?.cancel()
-        viewModelScope.launch {
+        ignition.stop()
+        scope.launch {
             poller.stop()
             stopMonitorService()
             // both: a reconnect cancelled mid-way may have opened the other transport
@@ -464,7 +541,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     dtcStatus = null,
                     dtcError = null,
                     dtcScanned = false,
-                    statusMessage = "Отключено"
+                    statusMessage = status,
+                    errorMessage = error
                 )
             }
             publishLive(connected = false, status = "Отключено")
@@ -480,7 +558,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (busExclusive()) return
         _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Чтение DTC…") }
-        viewModelScope.launch {
+        scope.launch {
             try {
                 poller.paused(client) {
                     val (stored, rawStored) = client.readStoredDtcs()
@@ -532,7 +610,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (busExclusive()) return
         _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Сброс DTC (Mode 04)…") }
-        viewModelScope.launch {
+        scope.launch {
             try {
                 poller.paused(client) {
                     val raw = client.clearDtcs()
@@ -574,7 +652,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun restartPolling() {
         if (busExclusive()) return // the exclusive job resumes polling with the new profile itself
-        viewModelScope.launch {
+        scope.launch {
             poller.stop()
             if (_ui.value.connectionState is ConnectionState.Connected) poller.start()
         }
@@ -625,6 +703,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             publishLive(connected = true, status = "ELM327 готов")
+            ignition.start(System.currentTimeMillis())
             startMonitorService()
             true
         } catch (e: CancellationException) {
@@ -643,6 +722,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onReconnectGaveUp(reason: String) {
+        ignition.stop()
         elm = null
         activeTransport = null
         cvtTempSmoother.reset()
@@ -727,10 +807,212 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+
+    // ---------------------------------------------------------------- 1.14: alerts / ignition / oil
+
+    /** After every publish: threshold alerts on fresh values, «car off» guard, one 2110 per connection. */
+    private fun onPublished(readings: List<SensorReading>) {
+        val now = System.currentTimeMillis()
+        fun fresh(id: String): Double? {
+            val r = readings.find { it.sensorId == id } ?: return null
+            if (r.value == null || r.isStale) return null
+            if (lastAlertSampleTs[id] == r.timestampMs) return null // same sample published twice per tick
+            lastAlertSampleTs[id] = r.timestampMs
+            return r.value
+        }
+        val settings = _ui.value.alertSettings
+        alertEngine.update(settings, fresh("cvt_temp"), fresh("coolant_temp"), fresh("ambient_temp"), now)
+            .forEach { AlertNotifier.show(app, it, settings) }
+        // ATRV voltage is measured by the adapter itself → not an ECU answer
+        checkIgnition(readings.any {
+            it.value != null && !it.isStale && it.sensorId != EngineExtras.ID_VOLTAGE && it.timestampMs >= now - 60_000
+        })
+        maybeAutoReadOil(now)
+    }
+
+    private fun checkIgnition(ecuAnswered: Boolean) {
+        if (!ignition.update(ecuAnswered, System.currentTimeMillis())) return
+        ignition.stop()
+        disconnectInternal(
+            status = "Отключено: ЭБУ не отвечает 3 мин",
+            error = "Нет ответа ЭБУ 3 минуты — похоже, зажигание выключено. Отключился, чтобы не сажать батарею."
+        )
+    }
+
+    private fun maybeAutoReadOil(now: Long) {
+        if (oilReadThisConnection) return
+        if (_ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID) return
+        if (now - connectedAtMs < OIL_AUTO_DELAY_MS || busExclusive()) return
+        oilReadThisConnection = true
+        readCvtOil()
+    }
+
+    /** EXPERIMENTAL 2110 @7E1 oil degradation counter: once per connection + button on «Авто». */
+    fun readCvtOil() {
+        val client = elm
+        if (client == null || _ui.value.connectionState !is ConnectionState.Connected) {
+            _ui.update { it.copy(cvtOilStatus = "Нет подключения — показано последнее значение") }
+            return
+        }
+        if (busExclusive()) return
+        _ui.update { it.copy(cvtOilBusy = true, cvtOilStatus = "Чтение 2110…") }
+        scope.launch {
+            try {
+                val r = poller.paused(client) { CvtOilDegradation.read(client) }
+                if (r.value != null) {
+                    settingsPrefs.edit().putString(K_OIL, CvtOilDegradation.serialize(r)).apply()
+                    _ui.update { it.copy(cvtOil = r, cvtOilAttempt = r, cvtOilStatus = "Обновлено") }
+                } else {
+                    _ui.update { it.copy(cvtOilAttempt = r, cvtOilStatus = "Не прочиталось: ${r.error ?: "нет данных"}") }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _ui.update { it.copy(cvtOilStatus = "Ошибка: ${e.message ?: "неизвестно"}") }
+            } finally {
+                _ui.update { it.copy(cvtOilBusy = false) }
+            }
+        }
+    }
+
+    /** 0100/0120/0140 right after init (functional 7DF); fallback: PID list of the saved passport. */
+    private suspend fun readSupportedPids(client: Elm327Client): Set<Int>? {
+        val replies = mutableListOf<String>()
+        for ((i, base) in listOf(0x00, 0x20, 0x40).withIndex()) {
+            // the very first OBD request after ATSP0 may run the protocol search («SEARCHING…»)
+            val raw = runCatching { client.send("01%02X".format(base), timeoutMs = if (i == 0) 6000 else 2500) }
+                .getOrElse { if (it is CancellationException) throw it; "" }
+            replies += raw
+            val got = com.chuikoff.obd.sensors.EngineMath.supportedPids(replies)
+            if (got == null || !got.contains(base + 0x20)) break
+        }
+        return com.chuikoff.obd.sensors.EngineMath.supportedPids(replies)
+            ?: _ui.value.passport?.pids01?.toSet()
+    }
+
+    fun setAlertSettings(s: AlertSettings) {
+        _ui.update { it.copy(alertSettings = s) }
+        settingsPrefs.edit()
+            .putBoolean(K_AL_CVT_ON, s.cvtEnabled).putInt(K_AL_CVT, s.cvtHotC)
+            .putBoolean(K_AL_COOL_ON, s.coolantEnabled).putInt(K_AL_COOL, s.coolantHotC)
+            .putBoolean(K_AL_ICE_ON, s.iceEnabled).putInt(K_AL_ICE, s.iceC)
+            .putBoolean(K_AL_SOUND, s.sound).putBoolean(K_AL_VIBRO, s.vibrate)
+            .apply()
+    }
+
+    private fun loadAlertSettings(): AlertSettings {
+        val d = AlertSettings()
+        return AlertSettings(
+            cvtEnabled = settingsPrefs.getBoolean(K_AL_CVT_ON, d.cvtEnabled),
+            cvtHotC = settingsPrefs.getInt(K_AL_CVT, d.cvtHotC),
+            coolantEnabled = settingsPrefs.getBoolean(K_AL_COOL_ON, d.coolantEnabled),
+            coolantHotC = settingsPrefs.getInt(K_AL_COOL, d.coolantHotC),
+            iceEnabled = settingsPrefs.getBoolean(K_AL_ICE_ON, d.iceEnabled),
+            iceC = settingsPrefs.getInt(K_AL_ICE, d.iceC),
+            sound = settingsPrefs.getBoolean(K_AL_SOUND, d.sound),
+            vibrate = settingsPrefs.getBoolean(K_AL_VIBRO, d.vibrate)
+        )
+    }
+
+    /** Test alert from «Профиль» (sound / vibration / Android Auto check without overheating anything). */
+    fun testAlert() {
+        val s = _ui.value.alertSettings
+        AlertNotifier.show(app, com.chuikoff.obd.alerts.AlertEvent(com.chuikoff.obd.alerts.AlertKind.ICE, s.iceC, s.iceC, System.currentTimeMillis()), s)
+    }
+
+    // ---------------------------------------------------------------- 1.14: auto-connect
+
+    /** Manual connect to the remembered adapter (Android Auto «Подключить»). */
+    fun connectLast(): Boolean {
+        val last = _ui.value.lastAdapter ?: return false
+        if (_ui.value.connectionState !is ConnectionState.Disconnected) return true
+        _ui.update { it.copy(preferredTransport = last.transport) }
+        connect(DiscoveredDevice(last.name, last.address, last.transport))
+        return true
+    }
+
+    fun setAutoConnect(on: Boolean) {
+        settingsPrefs.edit().putBoolean(K_AUTO, on).apply()
+        _ui.update { it.copy(autoConnect = on) }
+        if (!on) { autoJob?.cancel(); autoJob = null }
+    }
+
+    fun setAutoConnectOnBluetooth(on: Boolean) {
+        settingsPrefs.edit().putBoolean(K_AUTO_BT, on).apply()
+        _ui.update { it.copy(autoConnectOnBluetooth = on) }
+    }
+
+    private fun loadLastAdapter(): LastAdapter? {
+        val a = settingsPrefs.getString(K_LAST_ADDR, null) ?: return null
+        val t = runCatching { TransportType.valueOf(settingsPrefs.getString(K_LAST_TYPE, null)!!) }
+            .getOrDefault(TransportType.CLASSIC_SPP)
+        return LastAdapter(a, settingsPrefs.getString(K_LAST_NAME, null), t)
+    }
+
+    private fun saveLastAdapter(l: LastAdapter) {
+        settingsPrefs.edit().putString(K_LAST_ADDR, l.address).putString(K_LAST_NAME, l.name)
+            .putString(K_LAST_TYPE, l.transport.name).apply()
+    }
+
+    private fun hasBtPermission(): Boolean =
+        android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S ||
+            androidx.core.content.ContextCompat.checkSelfPermission(app, android.Manifest.permission.BLUETOOTH_CONNECT) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Connect the remembered adapter (app start, Android Auto session, car/adapter Bluetooth event).
+     * Same limit as the 1.13 reconnect: [Poller.MAX_RECONNECT_ATTEMPTS] tries with its backoff, then stop.
+     * Rules in [AutoConnectPolicy]. Any manual connect / disconnect cancels it.
+     */
+    fun autoConnect(trigger: AutoTrigger, btAddress: String? = null, btClass: Int? = null) {
+        val s = _ui.value
+        if (trigger == AutoTrigger.BLUETOOTH && !AutoConnectPolicy.relevantDevice(btAddress, btClass, s.lastAdapter)) return
+        val now = System.currentTimeMillis()
+        val skip = AutoConnectPolicy.skipReason(
+            AutoConnectPolicy.Input(
+                enabled = s.autoConnect, onBluetoothEvent = s.autoConnectOnBluetooth, trigger = trigger,
+                last = s.lastAdapter, disconnected = s.connectionState is ConnectionState.Disconnected && autoJob?.isActive != true,
+                permissionOk = hasBtPermission(), manualDisconnectAtMs = manualDisconnectAtMs,
+                lastAutoAttemptMs = lastAutoAttemptMs, nowMs = now
+            )
+        )
+        if (skip != null) return
+        val last = s.lastAdapter ?: return
+        lastAutoAttemptMs = now
+        val device = DiscoveredDevice(last.name, last.address, last.transport)
+        autoJob = scope.launch {
+            val max = Poller.MAX_RECONNECT_ATTEMPTS
+            for (attempt in 1..max) {
+                if (_ui.value.connectionState !is ConnectionState.Disconnected) return@launch
+                _ui.update {
+                    it.copy(
+                        preferredTransport = last.transport,
+                        statusMessage = "Автоподключение (${trigger.labelRu}) к ${last.name ?: last.address}: попытка $attempt из $max…"
+                    )
+                }
+                connectJob?.cancel()
+                val j = scope.launch { doConnect(device, auto = true) }
+                connectJob = j
+                j.join()
+                if (_ui.value.connectionState is ConnectionState.Connected) return@launch
+                if (attempt < max) {
+                    val wait = Poller.reconnectBackoffMs(attempt)
+                    _ui.update {
+                        it.copy(statusMessage = "Автоподключение: адаптер не ответил (попытка $attempt из $max), повтор через ${wait / 1000} с")
+                    }
+                    delay(wait)
+                }
+            }
+            _ui.update {
+                it.copy(statusMessage = "Автоподключение: адаптер не ответил за $max попыток. Подключись вручную.")
+            }
+        }
+    }
+
     private var linkJob: Job? = null
     private fun watchLink(c: Elm327Client) {
         linkJob?.cancel()
-        linkJob = viewModelScope.launch {
+        linkJob = scope.launch {
             c.linkNote.collect { n -> _ui.update { it.copy(linkNote = n) } }
         }
     }
@@ -742,11 +1024,11 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun startMonitorService() {
-        runCatching { ObdMonitorService.start(getApplication()) }
+        runCatching { ObdMonitorService.start(app) }
     }
 
     private fun stopMonitorService() {
-        runCatching { ObdMonitorService.stop(getApplication()) }
+        runCatching { ObdMonitorService.stop(app) }
     }
 
     private fun publishLiveFromReadings(readings: List<SensorReading>, connected: Boolean) {
@@ -761,7 +1043,13 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             cvtC = cvt?.value,
             ambientC = ambient?.value,
             ambientNote = ambient?.note,
-            cvtLockup = cvt?.statusLine
+            cvtLockup = cvt?.statusLine,
+            engine = ObdLiveData.EngineLive(
+                voltageText = byId(EngineExtras.ID_VOLTAGE)?.displayText,
+                voltageArgb = byId(EngineExtras.ID_VOLTAGE)?.valueArgb,
+                rpmText = byId(EngineExtras.ID_RPM)?.displayText,
+                fuelText = byId(EngineExtras.ID_FUEL)?.displayText
+            ).takeIf { it.voltageText != null || it.rpmText != null || it.fuelText != null }
         )
     }
 
@@ -772,7 +1060,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         cvtC: Double? = ObdLiveData.snapshot.value.cvtC,
         ambientC: Double? = ObdLiveData.snapshot.value.ambientC,
         ambientNote: String? = ObdLiveData.snapshot.value.ambientNote,
-        cvtLockup: String? = ObdLiveData.snapshot.value.cvtLockup
+        cvtLockup: String? = ObdLiveData.snapshot.value.cvtLockup,
+        engine: ObdLiveData.EngineLive? = ObdLiveData.snapshot.value.engine
     ) {
         ObdLiveData.update(
             connected = connected,
@@ -781,19 +1070,14 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             cvtC = cvtC,
             ambientC = ambientC,
             ambientNote = ambientNote,
-            cvtLockup = cvtLockup
+            cvtLockup = cvtLockup,
+            engine = engine
         )
     }
 
-    override fun onCleared() {
+    /** Activity destroyed: the connection stays (Android Auto / notification «Стоп»), only scanning stops. */
+    fun onUiDestroyed() {
         stopScan()
-        poller.cancel()
-        stopMonitorService()
-        ambientFilter.reset()
-        // Android Auto must not keep showing «Подключено» with the last values
-        publishLive(connected = false, status = "Отключено", coolantC = null, cvtC = null,
-            ambientC = null, ambientNote = null, cvtLockup = null)
-        super.onCleared()
     }
 
     /** Readable reason; missing «Устройства поблизости» permission gets an actionable hint. */
@@ -801,6 +1085,12 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         if (e is SecurityException) PERMISSION_HINT else e.message ?: "Ошибка подключения"
 
     companion object {
+        @Volatile private var instance: ObdController? = null
+
+        fun get(context: Context): ObdController = instance ?: synchronized(this) {
+            instance ?: ObdController(context.applicationContext as Application).also { instance = it }
+        }
+
         const val PERMISSION_HINT =
             "Нет разрешения «Устройства поблизости» (Bluetooth). Разреши его: Настройки → Приложения → OBD → Разрешения."
         private const val K_CVT_FORMULA = "formula"
@@ -808,5 +1098,20 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         private const val K_AMB_VALUE = "shown_c"
         private const val K_AMB_AT = "shown_at_ms"
         private const val AMBIENT_MAX_HELD = 10
+        private const val OIL_AUTO_DELAY_MS = 30_000L
+        private const val K_AUTO = "auto_connect"
+        private const val K_AUTO_BT = "auto_connect_bt"
+        private const val K_LAST_ADDR = "last_adapter_address"
+        private const val K_LAST_NAME = "last_adapter_name"
+        private const val K_LAST_TYPE = "last_adapter_transport"
+        private const val K_OIL = "cvt_oil_last"
+        private const val K_AL_CVT_ON = "alert_cvt_on"
+        private const val K_AL_CVT = "alert_cvt_c"
+        private const val K_AL_COOL_ON = "alert_coolant_on"
+        private const val K_AL_COOL = "alert_coolant_c"
+        private const val K_AL_ICE_ON = "alert_ice_on"
+        private const val K_AL_ICE = "alert_ice_c"
+        private const val K_AL_SOUND = "alert_sound"
+        private const val K_AL_VIBRO = "alert_vibrate"
     }
 }

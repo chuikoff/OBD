@@ -18,6 +18,15 @@ import com.chuikoff.obd.data.ObdLiveData
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.chuikoff.obd.ui.TempColorScale
+import androidx.car.app.AppManager
+import androidx.car.app.CarToast
+import androidx.car.app.model.Alert
+import androidx.car.app.model.AlertCallback
+import androidx.car.app.model.CarText
+import androidx.car.app.versioning.CarAppApiLevels
+import com.chuikoff.obd.alerts.AlertEvent
+import com.chuikoff.obd.alerts.AlertNotifier
+import com.chuikoff.obd.viewmodel.ObdController
 
 /**
  * Android Auto projected screen: connection + live temps from [ObdLiveData].
@@ -35,6 +44,29 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
                 }
             }
         }
+        // Threshold alerts (also posted as a notification with CarAppExtender) → in-car Alert / toast
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                AlertNotifier.events.collect { showInCar(it) }
+            }
+        }
+    }
+
+    private fun showInCar(e: AlertEvent) {
+        runCatching {
+            if (carContext.carAppApiLevel >= CarAppApiLevels.LEVEL_5) {
+                val alert = Alert.Builder(ALERT_ID_BASE + e.kind.ordinal, CarText.create(e.kind.titleRu), ALERT_DURATION_MS)
+                    .setSubtitle(CarText.create(e.textRu))
+                    .setCallback(object : AlertCallback {
+                        override fun onCancel(reason: Int) {}
+                        override fun onDismiss() {}
+                    })
+                    .build()
+                carContext.getCarService(AppManager::class.java).showAlert(alert)
+            } else {
+                CarToast.makeText(carContext, "${e.kind.titleRu}: ${e.textRu}", CarToast.LENGTH_LONG).show()
+            }
+        }
     }
 
     override fun onGetTemplate(): Template {
@@ -43,7 +75,7 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
         val statusLine = if (snap.connected) {
             "Подключено (телефон)"
         } else {
-            "Нет связи — откройте приложение на телефоне и подключите ELM"
+            "Нет связи — ${snap.statusText}"
         }
 
         /**
@@ -90,17 +122,23 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
                     .apply { snap.ambientNote?.let { addText(it) } }
                     .build()
             )
-            .addRow(
-                Row.Builder()
-                    .setTitle("Подсказка")
-                    .addText("Полное BT-подключение — в телефонном приложении OBD Outlander.")
-                    .build()
-            )
+            .addRow(engineRow(snap))
             .addAction(
-                Action.Builder()
-                    .setTitle("Обновить")
-                    .setOnClickListener { invalidate() }
-                    .build()
+                if (snap.connected) {
+                    Action.Builder()
+                        .setTitle("Обновить")
+                        .setOnClickListener { invalidate() }
+                        .build()
+                } else {
+                    Action.Builder()
+                        .setTitle("Подключить")
+                        .setOnClickListener {
+                            val ok = ObdController.get(carContext).connectLast()
+                            if (!ok) CarToast.makeText(carContext, "Адаптер ещё не подключался — подключи на телефоне", CarToast.LENGTH_LONG).show()
+                            invalidate()
+                        }
+                        .build()
+                }
             )
 
         return PaneTemplate.Builder(paneBuilder.build())
@@ -109,7 +147,32 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
             .build()
     }
 
+    /** «Двигатель: 14.1 В · 850 об/мин · 1.1 л/ч» while connected, otherwise the old hint. */
+    private fun engineRow(snap: ObdLiveData.Snapshot): Row {
+        val e = snap.engine
+        if (!snap.connected || e == null) {
+            return Row.Builder()
+                .setTitle("Подсказка")
+                .addText("Подключение — в приложении OBD на телефоне или кнопкой «Подключить».")
+                .build()
+        }
+        val parts = listOfNotNull(e.voltageText, e.rpmText, e.fuelText)
+        val text = parts.joinToString(" · ")
+        val span = SpannableString(text)
+        val v = e.voltageText
+        val argb = e.voltageArgb
+        if (v != null && argb != null) {
+            span.setSpan(
+                ForegroundCarColorSpan.create(CarColor.createCustom(argb.toInt(), argb.toInt())),
+                0, v.length, Spanned.SPAN_INCLUSIVE_EXCLUSIVE
+            )
+        }
+        return Row.Builder().setTitle("Двигатель").addText(span).build()
+    }
+
     private companion object {
         const val MIN_REFRESH_MS = 1_000L
+        const val ALERT_ID_BASE = 700
+        const val ALERT_DURATION_MS = 10_000L
     }
 }

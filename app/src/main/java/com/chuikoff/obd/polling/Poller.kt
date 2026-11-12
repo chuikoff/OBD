@@ -51,6 +51,8 @@ class Poller(
         fun pollingChanged(running: Boolean)
         /** Resume polling after an exclusive job only while still connected. */
         fun canResume(): Boolean
+        /** Extra engine Mode 01 cards (voltage, RPM…), one of them per engine tick; see [extraForTick]. */
+        fun extraSensors(): List<SensorDefinition> = emptyList()
     }
 
     private var job: Job? = null
@@ -168,8 +170,10 @@ class Poller(
         tick++
         val profile = host.profile
         val outlander = profile.id == OUTLANDER_PROFILE_ID
-        val all = profile.sensors()
-        val sensors = sensorsForTick(all, tick, outlander)
+        val extras = host.extraSensors()
+        val base = profile.sensors()
+        val all = base + extras
+        val sensors = withExtra(sensorsForTick(base, tick, outlander), extraForTick(extras, tick, outlander))
         val cvtOnly = outlander && sensors.size == 1 && sensors[0].id == "cvt_temp"
         // CVT-only ticks stay on TCM (skipPostRestore) → fast lock-up refresh
         CvtPollPace.skipPostRestore = cvtOnly
@@ -229,6 +233,32 @@ class Poller(
             return all.filter { it.id in want }.sortedBy {
                 when (it.id) { "cvt_temp" -> 0; "coolant_temp" -> 1; else -> 2 }
             }
+        }
+
+        /**
+         * At most ONE extra Mode 01 read per tick, so CVT / lock-up pace is kept: Outlander only on
+         * coolant ticks (even: already on the engine ECU, never on the fast CVT-only ticks), other
+         * profiles every tick. RPM every other slot, the rest round-robin.
+         */
+        fun extraForTick(extras: List<SensorDefinition>, tick: Int, outlander: Boolean): SensorDefinition? {
+            if (extras.isEmpty()) return null
+            if (outlander && tick % 2 != 0) return null
+            val slot = (if (outlander) tick / 2 - 1 else tick - 1).coerceAtLeast(0)
+            val rpm = extras.firstOrNull { it.id == "rpm" }
+            val others = extras.filter { it.id != "rpm" }
+            val pattern = when {
+                rpm == null -> others
+                others.isEmpty() -> listOf(rpm)
+                else -> others.flatMap { listOf(rpm, it) }
+            }
+            return pattern[slot % pattern.size]
+        }
+
+        /** Extra goes after coolant (engine addressing) and before ambient (AWC 7B6). */
+        fun withExtra(base: List<SensorDefinition>, extra: SensorDefinition?): List<SensorDefinition> {
+            if (extra == null) return base
+            val i = base.indexOfFirst { it.id == "ambient_temp" }
+            return if (i < 0) base + extra else base.subList(0, i) + extra + base.subList(i, base.size)
         }
 
         /** Keep profile sensor order when merging a partial poll into the last full snapshot. */

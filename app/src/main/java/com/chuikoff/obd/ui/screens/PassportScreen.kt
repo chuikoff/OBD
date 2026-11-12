@@ -30,6 +30,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.chuikoff.obd.passport.MonitorStatus
+import com.chuikoff.obd.sensors.CvtOilDegradation
+import androidx.compose.ui.text.font.FontWeight
 import com.chuikoff.obd.passport.Passport
 import com.chuikoff.obd.passport.PassportData
 import com.chuikoff.obd.viewmodel.ConnectionState
@@ -39,7 +41,7 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun PassportScreen(state: ObdUiState, onRefresh: () -> Unit, exportText: () -> String) {
+fun PassportScreen(state: ObdUiState, onRefresh: () -> Unit, exportText: () -> String, onReadCvtOil: () -> Unit = {}) {
     val context = LocalContext.current
     val connected = state.connectionState is ConnectionState.Connected
     val d = state.passport
@@ -93,6 +95,9 @@ fun PassportScreen(state: ObdUiState, onRefresh: () -> Unit, exportText: () -> S
             if (state.passportBusy) Text("Опрос датчиков приостановлен на время чтения…", style = MaterialTheme.typography.bodySmall)
             state.passportStatus?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
         }
+        if (state.selectedProfile.id == "mitsubishi_outlander_gf_gg") {
+            item { CvtOilCard(state, connected, onReadCvtOil) }
+        }
         if (d != null) {
             item { VinCard(d) }
             item { IdsCard(d) }
@@ -116,6 +121,37 @@ private fun Section(title: String, content: @Composable () -> Unit) {
             content()
         }
     }
+}
+
+/** EXPERIMENTAL 2110 oil degradation counter (raw / candidates in «Показания → Диагностика»). */
+@Composable
+private fun CvtOilCard(state: ObdUiState, connected: Boolean, onRead: () -> Unit) = Section("Деградация масла CVT · экспериментально") {
+    val r = state.cvtOil
+    if (r?.value != null) {
+        Text("%,d".format(Locale("ru"), r.value), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        r.percentOfGuide?.let {
+            Text(
+                "≈ %.0f %% от %,d (ориентир замены по OUT-CLUB, не официально)".format(Locale("ru"), it, CvtOilDegradation.GUIDE_LIMIT),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        Text(
+            "Прочитано: " + SimpleDateFormat("dd.MM.yyyy HH:mm", Locale("ru")).format(Date(r.atMs)) + " · ${r.source}",
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    } else {
+        Text("Ещё не прочитано", style = MaterialTheme.typography.bodyMedium)
+    }
+    Text(
+        "Счётчик износа масла вариатора (MUT-III «CVT oil degradation level»), 2110 @7E1, байты AC·256+AD " +
+            "по elm3.ru. Не проверено на этой машине: сравни с сервисом. RAW и все варианты — в «Показания → Диагностика».",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.height(4.dp))
+    OutlinedButton(onClick = onRead, enabled = connected && !state.cvtOilBusy) {
+        Text(if (state.cvtOilBusy) "Чтение…" else "Прочитать", maxLines = 1)
+    }
+    state.cvtOilStatus?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
 }
 
 @Composable

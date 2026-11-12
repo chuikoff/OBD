@@ -3,13 +3,16 @@ package com.chuikoff.obd.sensors
 import com.chuikoff.obd.elm327.Elm327Client
 import com.chuikoff.obd.elm327.Elm327Parser
 import com.chuikoff.obd.vehicle.CvtTempCommand
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 
 /**
  * CVT / gearbox fluid temperature — manufacturer / ECU specific.
  * Command sequence comes from the active [com.chuikoff.obd.vehicle.VehicleProfile].
  *
  * Mode 21 path (Outlander 2103):
- *  - flush, TCM addressing (pre-commands), send request
+ *  - TCM addressing (pre-commands; unchanged settings are skipped by the client cache), send request
  *  - line-aware ISO-TP reassembly ([Elm327Parser.parseMode21Frame]); frames with a lost
  *    ISO-TP frame (index gap) are rejected — byte offsets would be shifted
  *  - decode only from a frame whose leading [minMode21DataBytes] bytes are at true offsets
@@ -36,9 +39,7 @@ class CvtTempSensor(
         val healthy = CvtPollPace.consecutiveOk >= 2
         val firstTimeout = if (healthy) 2500L else 4000L
         return try {
-            // Flush only when the previous frame was bad — CR+drain costs ~0.5–1 s on clones
-            if (!healthy) runCatching { client.flushReadBuffer(timeoutMs = 400) }
-
+            // No manual flush: Elm327Client resyncs by itself after a missing prompt (dirty)
             for (pre in cmd.preCommands) {
                 client.send(pre, timeoutMs = 1500)
             }
@@ -50,7 +51,6 @@ class CvtTempSensor(
             var attempt = 0
             while ((parsed == null || parsed.value == null) && attempt < maxRetries) {
                 attempt++
-                runCatching { client.flushReadBuffer(timeoutMs = 400) }
                 raw = client.send(cmd.request, timeoutMs = retryTimeoutMs)
                 rawForError = raw
                 parsed = parseAndDecode(cmd, raw)
@@ -78,6 +78,8 @@ class CvtTempSensor(
                 isPlaceholder = cmd.isPlaceholder,
                 error = "Нет данных — ECU не ответил / кадр неполный (raw для отладки)"
             )
+        } catch (e: CancellationException) {
+            throw e // poll stopped (DTC / passport / disconnect): no fake error reading
         } catch (e: Exception) {
             CvtPollPace.markBad()
             SensorReading(
@@ -92,7 +94,7 @@ class CvtTempSensor(
             )
         } finally {
             // Stay on TCM when the poll loop will ask CVT again immediately (CVT-only tick)
-            if (!CvtPollPace.skipPostRestore) {
+            if (!CvtPollPace.skipPostRestore && currentCoroutineContext().isActive) {
                 for (post in cmd.postCommands) {
                     runCatching { client.send(post, timeoutMs = 1500) }
                 }

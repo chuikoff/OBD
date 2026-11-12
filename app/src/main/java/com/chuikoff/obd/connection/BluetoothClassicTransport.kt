@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -149,13 +150,13 @@ class BluetoothClassicTransport(
             markDead()
             throw IOException("BT сокет мёртв (не подключён)")
         }
-        // Slightly longer effective wait while driving / bus busy (caller may also raise)
-        val effectiveTimeout = timeoutMs.coerceAtLeast(2500L)
+        // Callers pass the real budget (ATZ 5 s, 2103 2.5–4 s, AT 1.5 s, drain 0.4–1 s); no hidden floor
         val buf = StringBuilder()
-        val deadline = System.currentTimeMillis() + effectiveTimeout
+        val deadline = System.currentTimeMillis() + timeoutMs
         val tmp = ByteArray(256)
         try {
             while (System.currentTimeMillis() < deadline) {
+                ensureActive() // let stop/disconnect cancel a read within ~20 ms instead of waiting it out
                 if (!sock.isConnected) {
                     markDead()
                     throw IOException("BT сокет закрыт во время чтения")

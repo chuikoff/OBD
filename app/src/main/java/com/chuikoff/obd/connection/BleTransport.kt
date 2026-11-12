@@ -14,12 +14,14 @@ import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.os.Build
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -289,7 +291,13 @@ class BleTransport(
     }
 
     @SuppressLint("MissingPermission")
+    /** GATT dropped (onConnectionStateChange → DISCONNECTED): fail fast so the poller reconnects. */
+    private fun checkAlive() {
+        if (!_isConnected.value) throw IOException("BLE сокет мёртв (адаптер отключился)")
+    }
+
     override suspend fun write(data: ByteArray): Unit = withContext(Dispatchers.Main) {
+        checkAlive()
         val g = gatt ?: error("Не подключено")
         val rx = writeCharacteristic ?: error("Write characteristic отсутствует")
         val writeType =
@@ -315,9 +323,14 @@ class BleTransport(
     }
 
     override suspend fun readUntilPrompt(timeoutMs: Long): String = withContext(Dispatchers.IO) {
+        checkAlive()
         val buf = StringBuilder()
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
+            ensureActive()
+            if (!_isConnected.value && incoming.isEmpty()) {
+                throw IOException("BLE сокет мёртв (отключился во время чтения)")
+            }
             var b = incoming.poll()
             while (b != null) {
                 buf.append(b.toInt().toChar())
@@ -337,7 +350,8 @@ class BleTransport(
                 val d = result.device ?: return
                 onResult(
                     DiscoveredDevice(
-                        name = result.scanRecord?.deviceName ?: d.name,
+                        // d.name needs BLUETOOTH_CONNECT; without it show the address only
+                        name = result.scanRecord?.deviceName ?: runCatching { d.name }.getOrNull(),
                         address = d.address,
                         transportType = TransportType.BLE,
                         rssi = result.rssi

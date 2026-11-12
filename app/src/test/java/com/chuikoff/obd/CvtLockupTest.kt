@@ -84,6 +84,17 @@ class CvtLockupTest {
         assertNull(CvtLockupDetector.sampleFrom2103(ByteArray(2)))
     }
 
+    @Test fun coastingNegativeSlipUnlocks() {
+        val d = CvtLockupDetector()
+        repeat(2) { d.update(s(1856, 1856)) }
+        assertEquals(State.LOCKED, d.update(s(1856, 1856)).state)
+        // foot off the gas: primary 1600 outruns engine 1200 (slip −400) → lock-up released
+        assertEquals(State.UNLOCKED, d.update(s(1600, 1200)).state)
+        // small negative slip inside the band keeps the state (hysteresis), like positive slip
+        assertEquals(State.LOCKED, d.update(s(1856, 1856)).state)
+        assertEquals(State.LOCKED, d.update(s(1952, 1856)).state)
+    }
+
     @Test fun engineBelow900DoesNotLock() {
         val d = CvtLockupDetector()
         // slip 0 but engine 896

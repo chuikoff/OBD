@@ -82,7 +82,8 @@ class CvtLockupDetector(
                 if (lowSlipStreak >= need) state = State.LOCKED
                 // else keep previous (UNKNOWN / UNLOCKED / IDLE) until confirmed
             }
-            slip > unlockMinSlip -> {
+            // coasting: primary outruns the engine (slip < 0) — just as unlocked as slip > 0
+            abs(slip) > unlockMinSlip -> {
                 lowSlipStreak = 0
                 state = State.UNLOCKED
             }

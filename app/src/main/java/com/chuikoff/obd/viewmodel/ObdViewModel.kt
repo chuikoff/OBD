@@ -16,6 +16,7 @@ import com.chuikoff.obd.sensors.AmbientDisplayFilter
 import com.chuikoff.obd.passport.Passport
 import com.chuikoff.obd.passport.PassportData
 import com.chuikoff.obd.passport.PassportReader
+import com.chuikoff.obd.polling.Poller
 import com.chuikoff.obd.sensors.CvtDebugEntry
 import com.chuikoff.obd.sensors.CvtDebugLog
 import com.chuikoff.obd.sensors.CvtFormula
@@ -28,13 +29,15 @@ import com.chuikoff.obd.sensors.VehicleSpeedReader
 import com.chuikoff.obd.service.ObdMonitorService
 import com.chuikoff.obd.vehicle.VehicleProfile
 import com.chuikoff.obd.vehicle.VehicleProfileRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class ObdUiState(
@@ -79,15 +82,11 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     private val classic = BluetoothClassicTransport(app)
     private val ble = BleTransport(app)
-    private val livePrefs = ObdLiveData.prefs(app)
 
     private var activeTransport: ObdTransport? = null
     private var elm: Elm327Client? = null
-    private var pollJob: Job? = null
     private var bleScanCallback: ScanCallback? = null
-
-    private var consecutiveHardFailures = 0
-    private var reconnectUsedThisSession = false
+    private var connectJob: Job? = null
     private val cvtTempSmoother = CvtTempSmoother()
     private val cvtLockup = CvtLockupDetector()
 
@@ -115,6 +114,41 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     private val cvtPrefs = app.getSharedPreferences("cvt_settings", android.content.Context.MODE_PRIVATE)
 
+    private val poller = Poller(viewModelScope, object : Poller.Host {
+        override val client: Elm327Client? get() = elm
+        override val profile: VehicleProfile get() = _ui.value.selectedProfile
+        override fun transportAlive(): Boolean = activeTransport?.isConnected?.value == true
+        override fun previousReadings(): List<SensorReading> = _ui.value.readings
+        override suspend fun process(client: Elm327Client, reading: SensorReading, outlander: Boolean): SensorReading =
+            when {
+                reading.sensorId == "cvt_temp" -> applyCvt(reading)
+                reading.sensorId == "ambient_temp" && outlander -> applyAmbientFilter(client, reading)
+                else -> reading
+            }
+        override fun publish(readings: List<SensorReading>) {
+            _ui.update { it.copy(readings = readings, statusMessage = "Опрос датчиков") }
+            publishLiveFromReadings(readings, connected = true)
+        }
+        override fun tickFailed(message: String) {
+            _ui.update {
+                it.copy(
+                    statusMessage = "ошибка опроса, переподключение… ($message)",
+                    // Live-only: do not keep prior cycle values after a failed poll
+                    readings = emptyList()
+                )
+            }
+            publishLive(connected = true, status = "ошибка опроса, переподключение…",
+                coolantC = null, cvtC = null, ambientC = null, ambientNote = null, cvtLockup = null)
+        }
+        override suspend fun reconnect(attempt: Int, reason: String): Boolean = reconnectSameDevice(attempt, reason)
+        override fun reconnectGaveUp(reason: String) = onReconnectGaveUp(reason)
+        override fun pollingChanged(running: Boolean) {
+            _ui.update { it.copy(isPolling = running) }
+            if (running) startMonitorService()
+        }
+        override fun canResume(): Boolean = _ui.value.connectionState is ConnectionState.Connected
+    })
+
     init {
         val formula = runCatching {
             CvtFormula.valueOf(cvtPrefs.getString(K_CVT_FORMULA, CvtFormula.OUT3_POLY.name)!!)
@@ -129,6 +163,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(cvtFormula = formula, cvtDebugExtra = extra, passport = cachedPassport) }
         viewModelScope.launch {
             CvtDebugLog.entries.collect { list -> _ui.update { it.copy(cvtLog = list) } }
+        }
+        // «Стоп» in the foreground-service notification really disconnects
+        viewModelScope.launch {
+            ObdMonitorService.stopRequests.collect { disconnect() }
         }
     }
 
@@ -175,39 +213,44 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update { it.copy(passportStatus = "Нет подключения — показан сохранённый паспорт") }
             return
         }
-        if (_ui.value.passportBusy) return
+        if (busExclusive()) return
+        _ui.update { it.copy(passportBusy = true, passportStatus = "Чтение паспорта…") }
         viewModelScope.launch {
-            _ui.update { it.copy(passportBusy = true, passportStatus = "Чтение паспорта…") }
-            val wasPolling = _ui.value.isPolling
-            stopPolling()
-            client.tolerateNoData = true
             try {
-                client.prepareStandardObdBus()
-                // Long multi-frame Mode 09 replies: default flow control, max per-frame wait
-                runCatching { client.send("ATFCSM0", timeoutMs = 1500) }
-                runCatching { client.send("ATAT1", timeoutMs = 1500) }
-                runCatching { client.send("ATSTFF", timeoutMs = 1500) }
-                val data = PassportReader.read(
-                    _ui.value.selectedProfile.displayNameRu,
-                    System.currentTimeMillis()
-                ) { cmd, t -> client.send(cmd, timeoutMs = t) }
-                getApplication<Application>().getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
-                    .edit().putString("data", Passport.serialize(data)).apply()
-                _ui.update { it.copy(passport = data, passportStatus = "Обновлено") }
-            } catch (e: kotlinx.coroutines.CancellationException) {
+                poller.paused(client) {
+                    client.tolerateNoData = true
+                    try {
+                        client.prepareStandardObdBus()
+                        // Long multi-frame Mode 09 replies: default flow control, max per-frame wait
+                        runCatching { client.send("ATFCSM0", timeoutMs = 1500) }
+                        runCatching { client.send("ATAT1", timeoutMs = 1500) }
+                        runCatching { client.send("ATSTFF", timeoutMs = 1500) }
+                        val data = PassportReader.read(
+                            _ui.value.selectedProfile.displayNameRu,
+                            System.currentTimeMillis()
+                        ) { cmd, t -> client.send(cmd, timeoutMs = t) }
+                        getApplication<Application>().getSharedPreferences("passport_cache", android.content.Context.MODE_PRIVATE)
+                            .edit().putString("data", Passport.serialize(data)).apply()
+                        _ui.update { it.copy(passport = data, passportStatus = "Обновлено") }
+                    } finally {
+                        client.tolerateNoData = false
+                        // back to normal timing; CVT/AWC sensors re-send their own ATFCSH/FCSD/FCSM1 pre-commands
+                        runCatching { client.send("ATST32", timeoutMs = 1500) }
+                        runCatching { client.restoreEngineEcuFilter() }
+                    }
+                }
+            } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 _ui.update { it.copy(passportStatus = "Ошибка чтения: ${e.message ?: "неизвестно"}") }
             } finally {
-                client.tolerateNoData = false
-                // back to normal timing; CVT/AWC sensors re-send their own ATFCSH/FCSD/FCSM1/ATST pre-commands
-                runCatching { client.send("ATST32", timeoutMs = 1500) }
-                runCatching { client.restoreEngineEcuFilter() }
                 _ui.update { it.copy(passportBusy = false) }
-                if (wasPolling && _ui.value.connectionState is ConnectionState.Connected) startPolling()
             }
         }
     }
+
+    /** DTC and passport reads share the bus: only one at a time (the buttons of the other tab stay enabled). */
+    private fun busExclusive(): Boolean = _ui.value.dtcBusy || _ui.value.passportBusy
 
     fun passportExportText(): String =
         _ui.value.passport?.let { Passport.toText(it, com.chuikoff.obd.BuildConfig.VERSION_NAME) } ?: ""
@@ -240,7 +283,12 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshBondedClassic() {
-        val bonded = classic.bondedDevices()
+        val bonded = try {
+            classic.bondedDevices()
+        } catch (e: SecurityException) {
+            _ui.update { it.copy(isScanning = false, errorMessage = PERMISSION_HINT) }
+            return
+        }
         _ui.update { state ->
             val merged = (bonded + state.devices)
                 .distinctBy { it.address + it.transportType }
@@ -262,7 +310,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             TransportType.BLE -> {
-                bleScanCallback = ble.startScan { device ->
+                bleScanCallback = try { ble.startScan { device ->
                     if (device.name.isNullOrBlank() && device.rssi == null) return@startScan
                     _ui.update { state ->
                         val list = (state.devices + device)
@@ -270,6 +318,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                             .sortedByDescending { it.rssi ?: Int.MIN_VALUE }
                         state.copy(devices = list)
                     }
+                } } catch (e: SecurityException) {
+                    _ui.update { it.copy(isScanning = false, errorMessage = PERMISSION_HINT) }
+                    return
                 }
                 if (bleScanCallback == null) {
                     _ui.update {
@@ -292,11 +343,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun connect(device: DiscoveredDevice) {
-        viewModelScope.launch {
+        connectJob?.cancel()
+        connectJob = viewModelScope.launch {
             stopScan()
-            stopPolling()
-            reconnectUsedThisSession = false
-            consecutiveHardFailures = 0
+            poller.stop()
             cvtTempSmoother.reset()
             cvtLockup.reset()
             CvtPollPace.reset()
@@ -355,7 +405,14 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 publishLive(connected = true, status = "ELM327 готов")
                 startMonitorService()
-                startPolling()
+                poller.start()
+            } catch (e: CancellationException) {
+                // «Отменить» while connecting: close whatever socket the blocking connect opened
+                withContext(NonCancellable) {
+                    runCatching { classic.disconnect() }
+                    runCatching { ble.disconnect() }
+                }
+                throw e
             } catch (e: Exception) {
                 runCatching { activeTransport?.disconnect() }
                 activeTransport = null
@@ -366,7 +423,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                         e.message?.contains("timeout", ignoreCase = true) == true ->
                         "Таймаут BLE. Этот OBDII скорее Classic: сопряги в настройках Bluetooth, " +
                             "переключись на Classic SPP и подключись. (${e.message})"
-                    else -> e.message ?: "Ошибка подключения"
+                    else -> permissionAware(e)
                 }
                 _ui.update {
                     it.copy(
@@ -381,13 +438,15 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        connectJob?.cancel()
         viewModelScope.launch {
-            stopPolling()
+            poller.stop()
             stopMonitorService()
-            runCatching { activeTransport?.disconnect() }
+            // both: a reconnect cancelled mid-way may have opened the other transport
+            runCatching { classic.disconnect() }
+            runCatching { ble.disconnect() }
             activeTransport = null
             elm = null
-            consecutiveHardFailures = 0
             cvtTempSmoother.reset()
             cvtLockup.reset()
             CvtPollPace.reset()
@@ -412,51 +471,51 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Mode 03 + Mode 07 DTC read. Temporarily pauses polling to avoid bus contention. */
+    /** Mode 03 + Mode 07 DTC read. Polling is paused (joined) for the duration. */
     fun readDtcs() {
         val client = elm
         if (client == null || _ui.value.connectionState !is ConnectionState.Connected) {
             _ui.update { it.copy(dtcError = "Нет подключения") }
             return
         }
+        if (busExclusive()) return
+        _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Чтение DTC…") }
         viewModelScope.launch {
-            _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Чтение DTC…") }
-            val wasPolling = _ui.value.isPolling
-            stopPolling()
             try {
-                val (stored, rawStored) = client.readStoredDtcs()
-                val (pending, rawPending) = runCatching { client.readPendingDtcs() }
-                    .getOrElse { emptyList<String>() to "" }
-                runCatching { client.restoreEngineEcuFilter() }
-                val nodataHint = when {
-                    stored.isEmpty() && pending.isEmpty() &&
-                        (rawStored.contains("NODATA") || rawPending.contains("NODATA") ||
-                            rawStored.isBlank()) ->
-                        " (NODATA = кодов нет)"
-                    else -> ""
+                poller.paused(client) {
+                    val (stored, rawStored) = client.readStoredDtcs()
+                    val (pending, rawPending) = try {
+                        client.readPendingDtcs()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        emptyList<String>() to ""
+                    }
+                    runCatching { client.restoreEngineEcuFilter() }
+                    val nodataHint = when {
+                        stored.isEmpty() && pending.isEmpty() &&
+                            (rawStored.contains("NODATA") || rawPending.contains("NODATA") ||
+                                rawStored.isBlank()) ->
+                            " (NODATA = кодов нет)"
+                        else -> ""
+                    }
+                    _ui.update {
+                        it.copy(
+                            dtcCodes = stored,
+                            dtcPending = pending,
+                            dtcScanned = true,
+                            dtcStatus = "Сохранённые: ${stored.size}, pending: ${pending.size}$nodataHint" +
+                                if (rawStored.isNotBlank()) " | raw03=$rawStored" else "",
+                            dtcError = null
+                        )
+                    }
                 }
-                _ui.update {
-                    it.copy(
-                        dtcCodes = stored,
-                        dtcPending = pending,
-                        dtcScanned = true,
-                        dtcStatus = "Сохранённые: ${stored.size}, pending: ${pending.size}$nodataHint" +
-                            if (rawStored.isNotBlank()) " | raw03=$rawStored" else "",
-                        dtcError = null,
-                        dtcBusy = false
-                    )
-                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _ui.update {
-                    it.copy(
-                        dtcBusy = false,
-                        dtcError = e.message ?: "Ошибка чтения DTC"
-                    )
-                }
+                _ui.update { it.copy(dtcError = e.message ?: "Ошибка чтения DTC") }
             } finally {
-                if (wasPolling && _ui.value.connectionState is ConnectionState.Connected) {
-                    startPolling()
-                }
+                _ui.update { it.copy(dtcBusy = false) }
             }
         }
     }
@@ -471,213 +530,67 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update { it.copy(dtcError = "Нет подключения") }
             return
         }
+        if (busExclusive()) return
+        _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Сброс DTC (Mode 04)…") }
         viewModelScope.launch {
-            _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Сброс DTC (Mode 04)…") }
-            val wasPolling = _ui.value.isPolling
-            stopPolling()
             try {
-                val raw = client.clearDtcs()
-                val cleaned = Elm327Parser.clean(raw)
-                val hex = Elm327Parser.hexDigits(raw)
-                if (hex.contains("7F") && !hex.contains("44")) {
-                    runCatching { client.restoreEngineEcuFilter() }
-                    _ui.update {
-                        it.copy(
-                            dtcStatus = "Сброс отклонён ЭБУ (условия). Ответ: $cleaned",
-                            dtcError = null,
-                            dtcBusy = false
-                        )
-                    }
-                } else if (hex.contains("44")) {
-                    val (stored, _) = runCatching { client.readStoredDtcs() }
-                        .getOrElse { emptyList<String>() to "" }
-                    val (pending, _) = runCatching { client.readPendingDtcs() }
-                        .getOrElse { emptyList<String>() to "" }
-                    runCatching { client.restoreEngineEcuFilter() }
-                    _ui.update {
-                        it.copy(
-                            dtcCodes = stored,
-                            dtcPending = pending,
-                            dtcScanned = true,
-                            dtcStatus = "DTC сброшены. Ответ: $cleaned",
-                            dtcError = null,
-                            dtcBusy = false
-                        )
-                    }
-                } else {
-                    val (stored, _) = runCatching { client.readStoredDtcs() }
-                        .getOrElse { emptyList<String>() to "" }
-                    val (pending, _) = runCatching { client.readPendingDtcs() }
-                        .getOrElse { emptyList<String>() to "" }
-                    runCatching { client.restoreEngineEcuFilter() }
-                    _ui.update {
-                        it.copy(
-                            dtcCodes = stored,
-                            dtcPending = pending,
-                            dtcScanned = true,
-                            dtcStatus = "Ответ сброса неоднозначен: $cleaned (коды перечитаны)",
-                            dtcError = null,
-                            dtcBusy = false
-                        )
+                poller.paused(client) {
+                    val raw = client.clearDtcs()
+                    val cleaned = Elm327Parser.clean(raw)
+                    val hex = Elm327Parser.hexDigits(raw)
+                    if (hex.contains("7F") && !hex.contains("44")) {
+                        runCatching { client.restoreEngineEcuFilter() }
+                        _ui.update {
+                            it.copy(dtcStatus = "Сброс отклонён ЭБУ (условия). Ответ: $cleaned", dtcError = null)
+                        }
+                    } else {
+                        val (stored, _) = runCatching { client.readStoredDtcs() }
+                            .getOrElse { emptyList<String>() to "" }
+                        val (pending, _) = runCatching { client.readPendingDtcs() }
+                            .getOrElse { emptyList<String>() to "" }
+                        runCatching { client.restoreEngineEcuFilter() }
+                        val status = if (hex.contains("44")) "DTC сброшены. Ответ: $cleaned"
+                        else "Ответ сброса неоднозначен: $cleaned (коды перечитаны)"
+                        _ui.update {
+                            it.copy(
+                                dtcCodes = stored,
+                                dtcPending = pending,
+                                dtcScanned = true,
+                                dtcStatus = status,
+                                dtcError = null
+                            )
+                        }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _ui.update {
-                    it.copy(
-                        dtcBusy = false,
-                        dtcError = e.message ?: "Ошибка сброса DTC"
-                    )
-                }
+                _ui.update { it.copy(dtcError = e.message ?: "Ошибка сброса DTC") }
             } finally {
-                if (wasPolling && _ui.value.connectionState is ConnectionState.Connected) {
-                    startPolling()
-                }
+                _ui.update { it.copy(dtcBusy = false) }
             }
         }
     }
 
     private fun restartPolling() {
-        stopPolling()
-        if (_ui.value.connectionState is ConnectionState.Connected) {
-            startPolling()
+        if (busExclusive()) return // the exclusive job resumes polling with the new profile itself
+        viewModelScope.launch {
+            poller.stop()
+            if (_ui.value.connectionState is ConnectionState.Connected) poller.start()
         }
     }
 
-    private var pollTick = 0
-
-    private fun startPolling() {
-        pollJob?.cancel()
-        pollTick = 0
-        CvtPollPace.reset()
-        pollJob = viewModelScope.launch {
-            _ui.update { it.copy(isPolling = true) }
-            startMonitorService()
-            while (isActive) {
-                val client = elm
-                if (client == null) {
-                    delay(1000)
-                    continue
-                }
-                try {
-                    pollTick++
-                    val profile = _ui.value.selectedProfile
-                    val outlander = profile.id == OUTLANDER_PROFILE_ID
-                    val all = profile.sensors()
-                    // Outlander: CVT every tick; coolant every 2nd; ambient every 3rd.
-                    // CVT-only ticks stay on TCM (skipPostRestore) → ~0.7–1.5 s lock-up refresh.
-                    val sensors = if (outlander) {
-                        val want = linkedSetOf("cvt_temp")
-                        if (pollTick % 2 == 0) want += "coolant_temp"
-                        if (pollTick % 3 == 0) want += "ambient_temp"
-                        all.filter { it.id in want }.sortedBy {
-                            when (it.id) { "cvt_temp" -> 0; "coolant_temp" -> 1; else -> 2 }
-                        }
-                    } else all
-                    val cvtOnly = outlander && sensors.size == 1 && sensors[0].id == "cvt_temp"
-                    CvtPollPace.skipPostRestore = cvtOnly
-
-                    val byId = _ui.value.readings.associateBy { it.sensorId }.toMutableMap()
-                    for (sensor in sensors) {
-                        val reading = try {
-                            sensor.read(client)
-                        } catch (e: Exception) {
-                            SensorReading(
-                                sensorId = sensor.id,
-                                displayName = sensor.displayNameRu,
-                                value = null,
-                                unit = sensor.unit,
-                                error = e.message ?: "Ошибка чтения"
-                            )
-                        }
-                        val applied = when {
-                            reading.sensorId == "cvt_temp" -> applyCvt(reading)
-                            reading.sensorId == "ambient_temp" && outlander ->
-                                applyAmbientFilter(client, reading)
-                            else -> reading
-                        }
-                        byId[applied.sensorId] = applied
-                        // Push CVT/lock-up to UI immediately — don't wait for coolant/ambient
-                        if (applied.sensorId == "cvt_temp") {
-                            val snap = orderReadings(all, byId)
-                            _ui.update {
-                                it.copy(readings = snap, statusMessage = "Опрос датчиков")
-                            }
-                            publishLiveFromReadings(snap, connected = true)
-                        }
-                    }
-                    consecutiveHardFailures = 0
-                    CvtPollPace.skipPostRestore = false
-                    val smoothed = orderReadings(all, byId)
-                    _ui.update {
-                        it.copy(readings = smoothed, statusMessage = "Опрос датчиков")
-                    }
-                    publishLiveFromReadings(smoothed, connected = true)
-                    // Short gap after CVT-only; a bit more after a full mix so the clone can breathe
-                    delay(when {
-                        cvtOnly -> 250L
-                        outlander -> 500L
-                        else -> 800L
-                    })
-                } catch (e: Exception) {
-                    // Soft recover: keep loop alive, but do not fake/hold stale readings
-                    CvtPollPace.reset()
-                    consecutiveHardFailures++
-                    val msg = e.message ?: "сбой цикла"
-                    _ui.update {
-                        it.copy(
-                            statusMessage = "ошибка опроса, переподключение… ($msg)",
-                            // Live-only: do not keep prior cycle values after a failed poll
-                            readings = emptyList()
-                        )
-                    }
-                    publishLive(
-                        connected = true,
-                        status = "ошибка опроса, переподключение…",
-                        coolantC = null,
-                        cvtC = null,
-                        ambientC = null,
-                        ambientNote = null
-                    )
-                    runCatching { client.flushReadBuffer() }
-                    runCatching { client.restoreEngineEcuFilter() }
-
-                    val deadSocket = msg.contains("сокет мёртв", ignoreCase = true) ||
-                        msg.contains("BT сокет", ignoreCase = true) ||
-                        (activeTransport is BluetoothClassicTransport &&
-                            !(activeTransport as BluetoothClassicTransport).isSocketAlive())
-
-                    if ((consecutiveHardFailures >= HARD_FAIL_RECONNECT_THRESHOLD || deadSocket) &&
-                        !reconnectUsedThisSession
-                    ) {
-                        reconnectUsedThisSession = true
-                        _ui.update { it.copy(statusMessage = "Переподключение к адаптеру…") }
-                        val ok = reconnectSameDevice()
-                        if (ok) {
-                            consecutiveHardFailures = 0
-                            _ui.update { it.copy(statusMessage = "Переподключено — опрос продолжен") }
-                        } else {
-                            _ui.update {
-                                it.copy(statusMessage = "Переподключение не удалось: $msg")
-                            }
-                        }
-                    }
-                    delay(2000L)
-                }
-            }
-        }
-    }
-
-    /** Keep profile sensor order when merging a partial poll into the last full snapshot. */
-    private fun orderReadings(
-        all: List<com.chuikoff.obd.sensors.SensorDefinition>,
-        byId: Map<String, SensorReading>
-    ): List<SensorReading> = all.mapNotNull { byId[it.id] }
-
-
-    /** Disconnect + connect last address once. Returns true on success. */
-    private suspend fun reconnectSameDevice(): Boolean {
+    /** Disconnect + connect the last address (called by [Poller] after a link drop). */
+    private suspend fun reconnectSameDevice(attempt: Int, reason: String): Boolean {
         val address = _ui.value.connectedAddress ?: return false
         val type = _ui.value.preferredTransport
+        _ui.update {
+            it.copy(
+                connectionState = ConnectionState.Connecting,
+                statusMessage = "Переподключение к адаптеру… (попытка $attempt из ${Poller.MAX_RECONNECT_ATTEMPTS}): $reason"
+            )
+        }
+        publishLive(connected = false, status = "Переподключение…")
         return try {
             runCatching { activeTransport?.disconnect() }
             elm = null
@@ -690,7 +603,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     try {
                         ble.connect(address)
                         activeTransport = ble
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (_: Exception) {
+                        runCatching { ble.disconnect() }
                         classic.connect(address)
                         activeTransport = classic
                         _ui.update { it.copy(preferredTransport = TransportType.CLASSIC_SPP) }
@@ -704,23 +620,46 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     connectionState = ConnectionState.Connected,
                     connectedAddress = address,
-                    statusMessage = "ELM327 готов после reconnect (${transport.name})"
+                    errorMessage = null,
+                    statusMessage = "ELM327 готов после переподключения (${transport.name})"
                 )
             }
+            publishLive(connected = true, status = "ELM327 готов")
             startMonitorService()
             true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             elm = null
             activeTransport = null
             _ui.update {
                 it.copy(
-                    connectionState = ConnectionState.Disconnected,
-                    errorMessage = "Reconnect fail: ${e.message}"
+                    statusMessage = "Переподключение не удалось (попытка $attempt): ${permissionAware(e)} — " +
+                        "повтор через ${Poller.reconnectBackoffMs(attempt) / 1000} с"
                 )
             }
-            stopMonitorService()
             false
         }
+    }
+
+    private fun onReconnectGaveUp(reason: String) {
+        elm = null
+        activeTransport = null
+        cvtTempSmoother.reset()
+        cvtLockup.reset()
+        lastCvtStatusLine = null
+        lastCvtStatusArgb = null
+        _ui.update {
+            it.copy(
+                connectionState = ConnectionState.Disconnected,
+                isPolling = false,
+                readings = emptyList(),
+                errorMessage = "Связь с адаптером потеряна ($reason). Подключись заново.",
+                statusMessage = "Отключено"
+            )
+        }
+        publishLive(connected = false, status = "Связь с адаптером потеряна")
+        stopMonitorService()
     }
 
     /**
@@ -802,12 +741,6 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         ambientHeld = 0
     }
 
-    private fun stopPolling() {
-        pollJob?.cancel()
-        pollJob = null
-        _ui.update { it.copy(isPolling = false) }
-    }
-
     private fun startMonitorService() {
         runCatching { ObdMonitorService.start(getApplication()) }
     }
@@ -848,30 +781,32 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             cvtC = cvtC,
             ambientC = ambientC,
             ambientNote = ambientNote,
-            cvtLockup = cvtLockup,
-            prefs = livePrefs
+            cvtLockup = cvtLockup
         )
     }
 
     override fun onCleared() {
         stopScan()
-        stopPolling()
+        poller.cancel()
         stopMonitorService()
         ambientFilter.reset()
-        try {
-            // transports closed by disconnect paths
-        } finally {
-            super.onCleared()
-        }
+        // Android Auto must not keep showing «Подключено» with the last values
+        publishLive(connected = false, status = "Отключено", coolantC = null, cvtC = null,
+            ambientC = null, ambientNote = null, cvtLockup = null)
+        super.onCleared()
     }
 
+    /** Readable reason; missing «Устройства поблизости» permission gets an actionable hint. */
+    private fun permissionAware(e: Throwable): String =
+        if (e is SecurityException) PERMISSION_HINT else e.message ?: "Ошибка подключения"
+
     companion object {
-        private const val HARD_FAIL_RECONNECT_THRESHOLD = 5
+        const val PERMISSION_HINT =
+            "Нет разрешения «Устройства поблизости» (Bluetooth). Разреши его: Настройки → Приложения → OBD → Разрешения."
         private const val K_CVT_FORMULA = "formula"
         private const val K_CVT_DEBUG_EXTRA = "debug_extra"
         private const val K_AMB_VALUE = "shown_c"
         private const val K_AMB_AT = "shown_at_ms"
         private const val AMBIENT_MAX_HELD = 10
-        private const val OUTLANDER_PROFILE_ID = "mitsubishi_outlander_gf_gg"
     }
 }

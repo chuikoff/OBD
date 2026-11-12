@@ -1,5 +1,6 @@
 package com.chuikoff.obd.sensors
 
+import kotlinx.coroutines.CancellationException
 import com.chuikoff.obd.elm327.Elm327Client
 import com.chuikoff.obd.elm327.Elm327Parser
 
@@ -38,6 +39,8 @@ class CoolantTempSensor : SensorDefinition {
                     rawHex = Elm327Parser.clean(raw)
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             SensorReading(
                 sensorId = id,

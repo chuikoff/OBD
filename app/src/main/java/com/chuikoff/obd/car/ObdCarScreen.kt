@@ -11,18 +11,34 @@ import androidx.car.app.model.Pane
 import androidx.car.app.model.PaneTemplate
 import androidx.car.app.model.Row
 import androidx.car.app.model.Template
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.chuikoff.obd.data.ObdLiveData
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.chuikoff.obd.ui.TempColorScale
 
 /**
  * Android Auto projected screen: connection + live temps from [ObdLiveData].
- * Full BT/ELM connect is done in the phone app.
+ * Full BT/ELM connect is done in the phone app. Re-renders on every snapshot change while visible,
+ * at most once per [MIN_REFRESH_MS] (refreshing the same PaneTemplate does not count as a new step).
  */
 class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
 
+    init {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                ObdLiveData.snapshot.collect { // StateFlow is conflated: a slow collector sees only the latest
+                    invalidate()
+                    delay(MIN_REFRESH_MS)
+                }
+            }
+        }
+    }
+
     override fun onGetTemplate(): Template {
-        val mem = ObdLiveData.snapshot.value
-        val snap = if (mem.updatedAtMs > 0L) mem else ObdLiveData.loadFromPrefs(carContext)
+        val snap = ObdLiveData.snapshot.value
 
         val statusLine = if (snap.connected) {
             "Подключено (телефон)"
@@ -91,5 +107,9 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
             .setTitle("OBD Outlander")
             .setHeaderAction(Action.APP_ICON)
             .build()
+    }
+
+    private companion object {
+        const val MIN_REFRESH_MS = 1_000L
     }
 }

@@ -465,43 +465,20 @@ object Elm327Parser {
     }
 
     /**
-     * Parse Mode 03 (stored) or Mode 07 (pending) DTC list.
-     * Response marker: 43 (mode 03) or 47 (mode 07). Each DTC is two bytes (SAE packing).
+     * Parse Mode 03 (stored) or Mode 07 (pending) DTC list from reassembled ECU messages.
+     * CAN (ISO 15765) reply: `43|47`, **count byte**, then 2 bytes per DTC (SAE J2012 packing).
+     * Several ECUs (7E8 engine, 7E9 TCM) → several messages; each is decoded on its own.
      */
     fun parseDtcList(raw: String): List<String> {
-        val cleaned = clean(raw)
-        if (cleaned.contains("NODATA")) return emptyList()
-        if (cleaned.contains("ERROR") || cleaned == "?") return emptyList()
-
-        val hexOnly = cleaned.filter { it in '0'..'9' || it in 'A'..'F' }
-        val codes = mutableListOf<String>()
-
-        // May contain multiple ECU replies / frames — find each 43 / 47 marker
-        var searchFrom = 0
-        while (searchFrom < hexOnly.length - 1) {
-            val idx43 = hexOnly.indexOf("43", searchFrom)
-            val idx47 = hexOnly.indexOf("47", searchFrom)
-            val idx = when {
-                idx43 < 0 && idx47 < 0 -> -1
-                idx43 < 0 -> idx47
-                idx47 < 0 -> idx43
-                else -> minOf(idx43, idx47)
+        if (clean(raw).contains("NODATA")) return emptyList()
+        return assemble(raw)
+            .filter { it.bytes.size >= 2 && toUnsigned(it.bytes[0]).let { s -> s == 0x43 || s == 0x47 } }
+            .flatMap { m ->
+                val count = toUnsigned(m.bytes[1])
+                m.bytes.drop(2).take(count * 2).chunked(2).filter { it.size == 2 }
+                    .mapNotNull { formatDtc(toUnsigned(it[0]), toUnsigned(it[1])) }
             }
-            if (idx < 0) break
-
-            var pos = idx + 2
-            while (pos + 3 < hexOnly.length) {
-                val peek = hexOnly.substring(pos, pos + 2)
-                if ((peek == "43" || peek == "47") && pos > idx + 2) break
-                val b1 = hexOnly.substring(pos, pos + 2).toIntOrNull(16) ?: break
-                val b2 = hexOnly.substring(pos + 2, pos + 4).toIntOrNull(16) ?: break
-                pos += 4
-                if (b1 == 0 && b2 == 0) continue
-                formatDtc(b1, b2)?.let { codes += it }
-            }
-            searchFrom = pos.coerceAtLeast(idx + 2)
-        }
-        return codes.distinct()
+            .distinct()
     }
 
     /**

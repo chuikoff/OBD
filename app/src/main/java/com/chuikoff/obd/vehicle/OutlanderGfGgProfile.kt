@@ -119,7 +119,8 @@ class OutlanderGfGgProfile : VehicleProfile {
             parseMode = CvtTempCommand.ParseMode.MODE21,
             preCommands = listOf(
                 "ATAT1",
-                "ATST16",
+                // no ATST16 (1.12.1): it cut the ELM's own ECU wait to ~88 ms, so the 4 s retry
+                // could never wait longer; ATAT1 already shortens the wait on a healthy link
                 "ATSH7E1",
                 "ATFCSH7E1",
                 "ATFCSD30080A",

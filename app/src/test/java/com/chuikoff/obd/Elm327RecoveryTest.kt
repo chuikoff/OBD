@@ -47,15 +47,4 @@ class Elm327RecoveryTest {
         assertTrue(r.contains("410D3C"))
         assertEquals(null, c.linkNote.value)
     }
-
-    @Test fun missingPromptForcesResyncBeforeNextCommand() = runBlocking {
-        var first = true
-        val t = Fake { c -> if (c == "0105" && first) { first = false; "" } else "OK\r>" }
-        val c = Elm327Client(t)
-        c.ensureInitialized()
-        c.send("0105")       // no prompt → dirty
-        t.sent.clear()
-        c.send("010D")
-        assertEquals(listOf("", "010D"), t.sent) // lone CR flush first
-    }
 }

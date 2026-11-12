@@ -1,5 +1,8 @@
 package com.chuikoff.obd.sensors
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import com.chuikoff.obd.elm327.Elm327Client
 import com.chuikoff.obd.elm327.Elm327Parser
 
@@ -107,6 +110,8 @@ class OutlanderAmbientTempSensor : SensorDefinition {
                     }
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             SensorReading(
                 sensorId = id,
@@ -118,7 +123,7 @@ class OutlanderAmbientTempSensor : SensorDefinition {
                 error = e.message ?: "Ошибка чтения AWC 210D"
             )
         } finally {
-            for (post in ENGINE_POST) {
+            if (currentCoroutineContext().isActive) for (post in ENGINE_POST) {
                 runCatching { client.send(post, timeoutMs = 2000) }
             }
         }

@@ -1,6 +1,9 @@
 package com.chuikoff.obd.elm327
 
 import com.chuikoff.obd.connection.ObdTransport
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -8,15 +11,19 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Thin ELM327 session: init AT sequence, send commands, return raw ASCII.
- * Tracks current ATSH header to skip redundant TCM preCommands while driving.
+ * Remembers stateful AT settings (ATSH, ATFCSH, ATFCSD, ATFCSM, ATCRA, ATST, ATAT) and skips a
+ * repeat with the same value — CVT-only ticks then cost one 2103 request instead of 6 AT round trips.
  */
 class Elm327Client(
     private val transport: ObdTransport
 ) {
     private val mutex = Mutex()
     @Volatile private var initialized = false
-    /** Last successful ATSH header (e.g. "7E1"), uppercase without prefix. */
-    @Volatile private var currentHeader: String? = null
+    /**
+     * Last accepted value per cached AT setting ("ATSH" → "7E1"). Cleared on ATZ/ATD/ATWS, recovery,
+     * resync after a missing prompt and whenever the adapter reports a reboot (ELM327 banner / LV RESET).
+     */
+    private val atState = HashMap<String, String>()
 
     /** True between write() and a received prompt: a cancelled/timed-out exchange leaves the ELM mid-reply. */
     @Volatile private var dirty = false
@@ -47,6 +54,16 @@ class Elm327Client(
 
         fun backoffMs(failures: Int): Long =
             minOf(BACKOFF_MAX_MS, BACKOFF_BASE_MS shl failures.coerceIn(0, 5))
+
+        /** Cached stateful AT settings; longest prefixes first. */
+        private val CACHED_AT = listOf("ATFCSH", "ATFCSD", "ATFCSM", "ATCRA", "ATSH", "ATST", "ATAT")
+
+        /** "ATSH7E1" → ("ATSH", "7E1"); null for non-cached commands or a bare prefix (e.g. "ATCRA" = reset). */
+        fun cacheKey(upperNoSpaces: String): Pair<String, String>? {
+            val p = CACHED_AT.firstOrNull { upperNoSpaces.startsWith(it) } ?: return null
+            val v = upperNoSpaces.removePrefix(p)
+            return if (v.isEmpty()) null else p to v
+        }
     }
 
     suspend fun ensureInitialized() = mutex.withLock {
@@ -57,7 +74,7 @@ class Elm327Client(
     }
 
     private suspend fun runInitLocked() {
-        currentHeader = null
+        atState.clear()
         val initCmds = listOf(
             "ATZ",   // reset
             "ATE0",  // echo off
@@ -84,12 +101,39 @@ class Elm327Client(
         flushLocked(timeoutMs)
     }
 
+    /**
+     * Drain a late reply; only if the ELM stays silent (busy, no prompt) interrupt it with a SPACE.
+     * Never a bare CR: on an idle ELM327 a lone CR repeats the last command (2103 again, or even 04).
+     * Spaces are ignored by the ELM command parser, so an idle adapter is unaffected.
+     */
     private suspend fun flushLocked(timeoutMs: Long) {
-        runCatching { transport.write("\r".toByteArray(Charsets.US_ASCII)) }
-        runCatching { transport.readUntilPrompt(timeoutMs) }
+        if (readQuiet(timeoutMs).contains('>')) return
+        try {
+            transport.write(" ".toByteArray(Charsets.US_ASCII))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return
+        }
+        readQuiet(timeoutMs)
     }
 
-    suspend fun send(command: String, timeoutMs: Long = 3000): String = mutex.withLock {
+    private suspend fun readQuiet(timeoutMs: Long): String =
+        try {
+            transport.readUntilPrompt(timeoutMs)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
+        }
+
+    suspend fun send(command: String, timeoutMs: Long = 3000): String {
+        // A cancelled poll must not touch the adapter (Mutex fast path does not check cancellation)
+        currentCoroutineContext().ensureActive()
+        return sendSerialized(command, timeoutMs)
+    }
+
+    private suspend fun sendSerialized(command: String, timeoutMs: Long): String = mutex.withLock {
         if (!initialized) {
             flushLocked(timeoutMs = 500)
             runInitLocked()
@@ -120,6 +164,7 @@ class Elm327Client(
         recoveryFailures++
         _linkNote.value = "переподключение… (попытка $recoveryFailures)"
         dirty = false
+        atState.clear()
         flushLocked(timeoutMs = 800)
         runCatching { runInitLocked() }
         initialized = true
@@ -129,60 +174,60 @@ class Elm327Client(
     private suspend fun sendLocked(command: String, timeoutMs: Long): String {
         if (dirty) {
             // previous exchange never saw its prompt (timeout / cancel): resync instead of
-            // typing into a busy ELM, which answers STOPPED
+            // typing into a busy ELM, which answers STOPPED; settings may be in doubt → forget cache
             dirty = false
+            atState.clear()
             flushLocked(timeoutMs = 1000)
         }
         val trimmed = command.trim()
-        val upper = trimmed.uppercase()
-
-        // Skip redundant ATSH if we are already on that header (cuts bus load while driving)
-        if (upper.startsWith("ATSH") && upper.length > 4) {
-            val header = upper.removePrefix("ATSH")
-            if (header.isNotEmpty() && header == currentHeader) {
-                return "OK"
-            }
-        }
+        val upper = trimmed.uppercase().replace(" ", "")
+        val key = cacheKey(upper)
+        // Same stateful AT setting already active → skip the round trip
+        if (key != null && atState[key.first] == key.second) return "OK"
 
         val payload = (trimmed + "\r").toByteArray(Charsets.US_ASCII)
-        dirty = true
         transport.write(payload)
+        dirty = true // only once the bytes really left; a cancelled/failed write leaves the ELM idle
         val response = transport.readUntilPrompt(timeoutMs)
         if (response.contains('>')) dirty = false
-
-        if (upper.startsWith("ATSH") && upper.length > 4) {
-            val header = upper.removePrefix("ATSH")
-            val cleaned = Elm327Parser.clean(response)
-            if (!cleaned.contains("ERROR") && cleaned != "?") {
-                currentHeader = header
-            }
-        } else if (upper == "ATZ" || upper == "ATD") {
-            currentHeader = null
-        } else if (upper.startsWith("ATCRA") || upper.startsWith("ATFCSH")) {
-            // addressing changed alongside headers — leave currentHeader as last ATSH
-        }
-
+        updateAtStateLocked(upper, key, response)
         return response
+    }
+
+    private fun updateAtStateLocked(upper: String, key: Pair<String, String>?, response: String) {
+        val c = Elm327Parser.clean(response)
+        when {
+            // adapter rebooted (brown-out) or reset → every setting is back to default
+            c.contains("ELM327") || c.contains("LVRESET") ||
+                upper == "ATZ" || upper == "ATD" || upper == "ATWS" -> atState.clear()
+            upper == "ATAR" || upper == "ATCRA" -> atState.remove("ATCRA")
+            key != null -> {
+                if (c.contains("ERROR") || c.contains("?") || !response.contains('>')) atState.remove(key.first)
+                else atState[key.first] = key.second
+            }
+        }
     }
 
     suspend fun resetSession() = mutex.withLock {
         initialized = false
-        currentHeader = null
+        atState.clear()
     }
 
     /**
      * Prepare bus for standard OBD Mode 03/07/04 after CVT/climate addressing.
+     * ATFCSM0: default flow control, so multi-frame replies from 7E8 *and* 7E9 get their FC
+     * (FCSM1 + FCSH7E0/7E1 left by the sensors would cut 3+ DTC replies after the first frame).
      */
     suspend fun prepareStandardObdBus() {
         send("ATH0", timeoutMs = 2000)
         runCatching { send("ATAL", timeoutMs = 1500) }
+        runCatching { send("ATFCSM0", timeoutMs = 1500) }
         send("ATSH7DF", timeoutMs = 2000)
         val ar = runCatching { send("ATAR", timeoutMs = 2000) }.getOrElse { "" }
         val arClean = Elm327Parser.clean(ar)
         if (arClean.contains("ERROR") || arClean.contains("?")) {
             runCatching { send("ATCRA000000", timeoutMs = 2000) }
         }
-        currentHeader = "7DF"
     }
 
     /** Restore engine-ECU addressing typically used for sensor polling. */

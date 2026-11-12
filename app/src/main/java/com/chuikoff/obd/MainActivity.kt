@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
         ensurePermissions()
         setContent {
             ObdTheme {
-                ObdApp(vm)
+                ObdApp(vm, onEnsurePermissions = ::ensurePermissions)
             }
         }
     }
@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun ObdApp(vm: ObdViewModel) {
+fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
     val state by vm.ui.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
 
@@ -151,9 +151,10 @@ fun ObdApp(vm: ObdViewModel) {
                 0 -> ConnectScreen(
                     state = state,
                     onTransport = vm::setTransport,
-                    onScan = vm::startScan,
+                    // re-ask for «Устройства поблизости» if it was denied; VM shows a hint meanwhile
+                    onScan = { onEnsurePermissions(); vm.startScan() },
                     onStopScan = vm::stopScan,
-                    onRefreshBonded = vm::refreshBondedClassic,
+                    onRefreshBonded = { onEnsurePermissions(); vm.refreshBondedClassic() },
                     onConnect = vm::connect,
                     onDisconnect = vm::disconnect
                 )

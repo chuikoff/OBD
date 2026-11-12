@@ -89,6 +89,9 @@ fun ConnectScreen(
                     CircularProgressIndicator(Modifier.padding(end = 12.dp))
                     Text("Подключение…")
                 }
+                Spacer(Modifier.height(8.dp))
+                // also stops automatic reconnect attempts after a link drop
+                OutlinedButton(onClick = onDisconnect) { Text("Отменить") }
             }
             ConnectionState.Connected -> {
                 Text(

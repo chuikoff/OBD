@@ -13,10 +13,14 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.chuikoff.obd.MainActivity
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 
 /**
  * Lightweight foreground service so Doze / App Standby does not kill BT polling
  * while driving. Holds a PARTIAL_WAKE_LOCK as a belt-and-suspenders measure.
+ * Polling lives in the ViewModel: «Стоп» asks it to disconnect ([stopRequests]); the service is
+ * NOT sticky, so after a process death it does not come back with a lying «подключён» notice.
  */
 class ObdMonitorService : Service() {
 
@@ -33,6 +37,7 @@ class ObdMonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                _stopRequests.tryEmit(Unit) // ViewModel → disconnect() (stops polling + socket)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -50,7 +55,7 @@ class ObdMonitorService : Service() {
                 }
             }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -120,6 +125,10 @@ class ObdMonitorService : Service() {
         const val NOTIFICATION_ID = 4201
         const val ACTION_STOP = "com.chuikoff.obd.action.STOP_MONITOR"
 
+        private val _stopRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+        /** «Стоп» tapped in the notification. */
+        val stopRequests: SharedFlow<Unit> = _stopRequests
+
         fun start(context: Context) {
             val i = Intent(context, ObdMonitorService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -129,12 +138,8 @@ class ObdMonitorService : Service() {
             }
         }
 
+        /** App-side stop (no ACTION_STOP: that would loop back into disconnect()). */
         fun stop(context: Context) {
-            runCatching {
-                context.startService(
-                    Intent(context, ObdMonitorService::class.java).setAction(ACTION_STOP)
-                )
-            }
             runCatching {
                 context.stopService(Intent(context, ObdMonitorService::class.java))
             }

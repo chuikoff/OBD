@@ -1,5 +1,6 @@
 package com.chuikoff.obd.vehicle
 
+import kotlinx.coroutines.CancellationException
 import com.chuikoff.obd.elm327.Elm327Client
 import com.chuikoff.obd.elm327.Elm327Parser
 import com.chuikoff.obd.sensors.CoolantTempSensor
@@ -212,6 +213,8 @@ private class CretaAmbientTempSensor : SensorDefinition {
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             SensorReading(
                 sensorId = id,

@@ -7,7 +7,6 @@ data class SensorReading(
     val unit: String,
     val rawHex: String? = null,
     val note: String? = null,
-    val isPlaceholder: Boolean = false,
     val error: String? = null,
     val timestampMs: Long = System.currentTimeMillis(),
     /** True when showing last valid CVT value because current frame was invalid. */

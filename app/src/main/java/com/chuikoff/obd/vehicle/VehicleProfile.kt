@@ -13,9 +13,6 @@ interface VehicleProfile {
     val notesRu: String
 
     fun sensors(): List<SensorDefinition>
-
-    /** Profile-specific CVT temperature command (may be a placeholder). */
-    fun cvtTempCommand(): CvtTempCommand
 }
 
 /**
@@ -31,7 +28,6 @@ data class CvtTempCommand(
     val preCommands: List<String> = emptyList(),
     /** AT commands after the read to restore engine ECU addressing. */
     val postCommands: List<String> = emptyList(),
-    val isPlaceholder: Boolean,
     val caveatRu: String,
     val decode: (ByteArray) -> Double?,
     /** Optional: human-readable decode candidates for the CVT debug log. */
@@ -45,5 +41,5 @@ data class CvtTempCommand(
         val describe: (ByteArray) -> String
     )
 
-    enum class ParseMode { MODE01, MODE21, MODE22, RAW_FIRST_BYTE }
+    enum class ParseMode { MODE21, MODE22 }
 }

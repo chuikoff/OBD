@@ -1,5 +1,6 @@
 package com.chuikoff.obd
 
+import androidx.compose.ui.res.painterResource
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -9,12 +10,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Badge
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.DirectionsCar
-import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -102,7 +97,7 @@ fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
                     alwaysShowLabel = true,
                     selected = tab == 0,
                     onClick = { tab = 0 },
-                    icon = { Icon(Icons.Default.Bluetooth, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_bluetooth), contentDescription = null) },
                     label = {
                         Text("Подключ.", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
@@ -111,7 +106,7 @@ fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
                     alwaysShowLabel = true,
                     selected = tab == 1,
                     onClick = { tab = 1 },
-                    icon = { Icon(Icons.Default.Speed, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_speed), contentDescription = null) },
                     label = {
                         Text("Показания", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
@@ -120,7 +115,7 @@ fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
                     alwaysShowLabel = true,
                     selected = tab == 2,
                     onClick = { tab = 2 },
-                    icon = { Icon(Icons.Default.Build, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_build), contentDescription = null) },
                     label = {
                         Text("Ошибки", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
@@ -129,7 +124,7 @@ fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
                     alwaysShowLabel = true,
                     selected = tab == 3,
                     onClick = { tab = 3 },
-                    icon = { Icon(Icons.Default.Badge, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_badge), contentDescription = null) },
                     label = {
                         Text("Авто", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }
@@ -138,7 +133,7 @@ fun ObdApp(vm: ObdViewModel, onEnsurePermissions: () -> Unit = {}) {
                     alwaysShowLabel = true,
                     selected = tab == 4,
                     onClick = { tab = 4 },
-                    icon = { Icon(Icons.Default.DirectionsCar, contentDescription = null) },
+                    icon = { Icon(painterResource(R.drawable.ic_directions_car), contentDescription = null) },
                     label = {
                         Text("Профиль", fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible, letterSpacing = 0.sp)
                     }

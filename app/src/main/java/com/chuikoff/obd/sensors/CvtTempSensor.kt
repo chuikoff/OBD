@@ -68,30 +68,12 @@ class CvtTempSensor(
             val ok = parsed?.value != null
             if (ok) CvtPollPace.markOk() else CvtPollPace.markBad()
 
-            parsed ?: SensorReading(
-                sensorId = id,
-                displayName = displayNameRu,
-                value = null,
-                unit = unit,
-                rawHex = Elm327Parser.displayRaw(raw),
-                note = noteFor(cmd),
-                isPlaceholder = cmd.isPlaceholder,
-                error = "Нет данных — ECU не ответил / кадр неполный (raw для отладки)"
-            )
+            parsed ?: errorReading(cmd, raw, "Нет данных — ECU не ответил / кадр неполный (raw для отладки)")
         } catch (e: CancellationException) {
             throw e // poll stopped (DTC / passport / disconnect): no fake error reading
         } catch (e: Exception) {
             CvtPollPace.markBad()
-            SensorReading(
-                sensorId = id,
-                displayName = displayNameRu,
-                value = null,
-                unit = unit,
-                rawHex = rawForError?.let { Elm327Parser.displayRaw(it) },
-                note = noteFor(cmd),
-                isPlaceholder = cmd.isPlaceholder,
-                error = e.message ?: "Ошибка чтения"
-            )
+            errorReading(cmd, rawForError, e.message ?: "Ошибка чтения")
         } finally {
             // Stay on TCM when the poll loop will ask CVT again immediately (CVT-only tick)
             if (!CvtPollPace.skipPostRestore && currentCoroutineContext().isActive) {
@@ -102,6 +84,16 @@ class CvtTempSensor(
             }
         }
     }
+
+    private fun errorReading(cmd: CvtTempCommand, raw: String?, error: String) = SensorReading(
+        sensorId = id,
+        displayName = displayNameRu,
+        value = null,
+        unit = unit,
+        rawHex = raw?.let { Elm327Parser.displayRaw(it) },
+        note = noteFor(cmd),
+        error = error
+    )
 
     private fun noteFor(cmd: CvtTempCommand): String =
         if (cmd.describeCandidates != null) "${cmd.caveatRu} · ${CvtSettings.formula.titleRu}"
@@ -156,16 +148,7 @@ class CvtTempSensor(
                 val validationErr = Elm327Parser.validateMode21Response(raw, pid)
                 if (validationErr != null) {
                     logMode21(cmd, raw, frame, null, validationErr)
-                    return SensorReading(
-                        sensorId = id,
-                        displayName = displayNameRu,
-                        value = null,
-                        unit = unit,
-                        rawHex = Elm327Parser.displayRaw(raw),
-                        note = noteFor(cmd),
-                        isPlaceholder = cmd.isPlaceholder,
-                        error = validationErr
-                    )
+                    return errorReading(cmd, raw, validationErr)
                 }
                 val payload = Elm327Parser.parseMode21PayloadHardened(
                     raw, pid, minDataBytes = minMode21DataBytes
@@ -173,38 +156,16 @@ class CvtTempSensor(
                 if (payload == null) {
                     val err = "Кадр короткий: ${frame?.payload?.size ?: 0} байт < $minMode21DataBytes"
                     logMode21(cmd, raw, frame, null, err)
-                    return SensorReading(
-                        sensorId = id,
-                        displayName = displayNameRu,
-                        value = null,
-                        unit = unit,
-                        rawHex = Elm327Parser.displayRaw(raw),
-                        note = noteFor(cmd),
-                        isPlaceholder = cmd.isPlaceholder,
-                        error = err
-                    )
+                    return errorReading(cmd, raw, err)
                 }
                 val reading = decodeReading(cmd, raw, payload)
                 logMode21(cmd, raw, frame, reading.value, reading.error)
                 return reading
             }
-            CvtTempCommand.ParseMode.MODE01 -> {
-                val payload = Elm327Parser.parseMode01Payload(raw, cmd.pidOrDid.toInt(16))
-                    ?: return null
-                if (payload.isEmpty()) return null
-                return decodeReading(cmd, raw, payload)
-            }
             CvtTempCommand.ParseMode.MODE22 -> {
                 val payload = Elm327Parser.parseMode22Payload(raw, cmd.pidOrDid)
                     ?: return null
                 if (payload.isEmpty()) return null
-                return decodeReading(cmd, raw, payload)
-            }
-            CvtTempCommand.ParseMode.RAW_FIRST_BYTE -> {
-                val cleaned = Elm327Parser.clean(raw)
-                val digits = cleaned.filter { it in '0'..'9' || it in 'A'..'F' }
-                if (digits.length < 2) return null
-                val payload = byteArrayOf(digits.takeLast(2).toInt(16).toByte())
                 return decodeReading(cmd, raw, payload)
             }
         }
@@ -224,7 +185,6 @@ class CvtTempSensor(
             unit = unit,
             rawHex = Elm327Parser.displayRaw(raw),
             note = noteFor(cmd),
-            isPlaceholder = cmd.isPlaceholder,
             error = if (value == null) "Декод не удался (байт 00/FF или вне −40…160 °C)" else null,
             cvtPrimaryRpm = kin?.primaryRpm,
             cvtSecondaryRpm = kin?.secondaryRpm,

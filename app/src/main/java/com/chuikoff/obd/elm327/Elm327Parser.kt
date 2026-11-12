@@ -250,30 +250,6 @@ object Elm327Parser {
     }
 
     /**
-     * Normalize OBD hex for Mode 21: reassembled hex starting at the first message whose first
-     * byte is `61`. Legacy PCI/odd-nibble fallbacks kept for unformatted (CAF0) dumps.
-     */
-    fun normalizeObdHex(raw: String): String {
-        val msgs = assemble(raw)
-        val i61 = msgs.indexOfFirst { it.bytes.isNotEmpty() && (it.bytes[0].toInt() and 0xFF) == 0x61 }
-        if (i61 >= 0) return msgs.drop(i61).joinToString("") { it.hex() }
-
-        var hex = hexDigits(raw)
-        if (hex.isEmpty()) return hex
-        var guard = 0
-        while (hex.length >= 4 && guard++ < 8) {
-            if (hex.length >= 6 && hex.startsWith("10") && hex.substring(4, 6) == "61") {
-                hex = hex.substring(4); continue
-            }
-            val sf = Regex("^0*0([1-9A-F])61").find(hex)
-            if (sf != null) { hex = hex.substring(sf.value.length - 2); continue }
-            break
-        }
-        val idx = indexOfMarkerAtEvenIndex(hex, "61")
-        return if (idx > 0) hex.substring(idx) else hex
-    }
-
-    /**
      * Parse Mode 01 response for a given PID.
      * Example: request "0105" -> response contains "4105XX"
      */
@@ -363,9 +339,6 @@ object Elm327Parser {
         return null
     }
 
-    fun parseMode21Payload(raw: String, pidByte: Int): ByteArray? =
-        parseMode21PayloadHardened(raw, pidByte, minDataBytes = 0)
-
     /**
      * Mode 21 payload (bytes after `61 PID`) from a properly reassembled message.
      * Returns null if marker missing, a frame was lost mid-message (positions shifted), or
@@ -396,7 +369,7 @@ object Elm327Parser {
 
     /**
      * Best-effort Mode 22 (enhanced diagnostics) payload parser.
-     * Uses [normalizeObdHex]-style cleanup and finds `62`+DID at an even nibble index
+     * Uses the same cleanup as Mode 21 and finds `62`+DID at an even nibble index
      * so messy RAW like `01F6201A0FFFF…` still locates `6201A0` correctly.
      */
     fun parseMode22Payload(raw: String, did: String): ByteArray? {
@@ -424,7 +397,7 @@ object Elm327Parser {
     }
 
     /**
-     * Mode 22 sibling of [normalizeObdHex]: strip ISO-TP PCI / junk so `62XX…` sits
+     * Mode 22 cleanup: strip ISO-TP PCI / junk so `62XX…` sits
      * on an even char index (handles leftovers like `01F6201A0…`).
      */
     fun normalizeMode22Hex(raw: String, marker: String = "62"): String {

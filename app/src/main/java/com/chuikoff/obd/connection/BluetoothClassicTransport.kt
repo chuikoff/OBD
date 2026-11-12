@@ -54,11 +54,6 @@ class BluetoothClassicTransport(
         socket = null
     }
 
-    fun isSocketAlive(): Boolean {
-        val s = socket
-        return _isConnected.value && s != null && s.isConnected
-    }
-
     @SuppressLint("MissingPermission")
     private fun tryConnect(device: BluetoothDevice, label: String, open: () -> BluetoothSocket): BluetoothSocket {
         val sock = open()

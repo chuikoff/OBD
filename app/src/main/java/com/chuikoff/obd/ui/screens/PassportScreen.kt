@@ -1,10 +1,7 @@
 package com.chuikoff.obd.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
-import android.widget.Toast
+import com.chuikoff.obd.ui.copyText
+import com.chuikoff.obd.ui.shareText
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -75,13 +72,13 @@ fun PassportScreen(state: ObdUiState, onRefresh: () -> Unit, exportText: () -> S
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val pad = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
                 OutlinedButton(
-                    onClick = { copy(context, exportText()) },
+                    onClick = { copyText(context, "Паспорт авто", "Паспорт скопирован", exportText()) },
                     enabled = d != null,
                     modifier = Modifier.weight(1f),
                     contentPadding = pad
                 ) { Text("Копировать", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelLarge) }
                 OutlinedButton(
-                    onClick = { share(context, exportText()) },
+                    onClick = { shareText(context, "Паспорт авто", "Поделиться паспортом", exportText()) },
                     enabled = d != null,
                     modifier = Modifier.weight(1f),
                     contentPadding = pad
@@ -195,17 +192,4 @@ private fun RawCard(d: PassportData) {
     }
 }
 
-private fun copy(context: Context, text: String) {
-    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-    cm.setPrimaryClip(ClipData.newPlainText("Паспорт авто", text))
-    Toast.makeText(context, "Паспорт скопирован", Toast.LENGTH_SHORT).show()
-}
 
-private fun share(context: Context, text: String) {
-    val send = Intent(Intent.ACTION_SEND).apply {
-        type = "text/plain"
-        putExtra(Intent.EXTRA_SUBJECT, "Паспорт авто")
-        putExtra(Intent.EXTRA_TEXT, text)
-    }
-    context.startActivity(Intent.createChooser(send, "Поделиться паспортом").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-}

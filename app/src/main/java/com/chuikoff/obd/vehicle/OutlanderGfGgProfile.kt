@@ -1,5 +1,6 @@
 package com.chuikoff.obd.vehicle
 
+import com.chuikoff.obd.elm327.Elm327Client
 import com.chuikoff.obd.elm327.Elm327Parser
 import com.chuikoff.obd.sensors.CoolantTempSensor
 import com.chuikoff.obd.sensors.CvtFormula
@@ -88,10 +89,6 @@ class OutlanderGfGgProfile : VehicleProfile {
             } else {
                 sb.append("N[13] нет (payload ${bytes.size} байт)")
             }
-            u(14)?.let { o ->
-                sb.append(String.format(Locale.US,
-                    " | O[14]=0x%02X(%d) (1.6.0 брала его) → %.1f°C", o, o, cvtPolyCelsius(o)))
-            }
             val a = u(0); val b = u(1); val c = u(2); val e = u(4)
             if (a != null && b != null && c != null) {
                 val prim = (a - 2) * 32; val sec = (b - 2) * 64; val eng = c * 32
@@ -121,20 +118,8 @@ class OutlanderGfGgProfile : VehicleProfile {
                 "ATAT1",
                 // no ATST16 (1.12.1): it cut the ELM's own ECU wait to ~88 ms, so the 4 s retry
                 // could never wait longer; ATAT1 already shortens the wait on a healthy link
-                "ATSH7E1",
-                "ATFCSH7E1",
-                "ATFCSD30080A",
-                "ATFCSM1",
-                "ATCRA7E9"
-            ),
-            postCommands = listOf(
-                "ATSH7E0",
-                "ATFCSH7E0",
-                "ATFCSD30080A",
-                "ATFCSM1",
-                "ATCRA7E8"
-            ),
-            isPlaceholder = false,
+            ) + Elm327Client.ecuAddressing("7E1", "7E9"),
+            postCommands = Elm327Client.ENGINE_ADDRESSING,
             caveatRu = "OUT-CLUB OUT3: 2103@7E1, байт N",
             decode = { bytes -> decodeCvtCelsius(bytes) },
             describeCandidates = { bytes -> describe2103(bytes) },
@@ -144,12 +129,11 @@ class OutlanderGfGgProfile : VehicleProfile {
         )
     }
 
-    override fun cvtTempCommand(): CvtTempCommand = OUT3_CVT
 
     override fun sensors(): List<SensorDefinition> = listOf(
         // CVT first — lock-up / temp refresh as often as the bus allows
         CvtTempSensor(
-            commandProvider = { cvtTempCommand() },
+            commandProvider = { OUT3_CVT },
             displayNameRu = "Температура CVT",
             // N is index 13 → need ≥14 data bytes at their true offsets
             minMode21DataBytes = CVT_BYTE_INDEX + 1,

@@ -1,5 +1,7 @@
 package com.chuikoff.obd.ui.screens
 
+import androidx.compose.ui.res.painterResource
+import com.chuikoff.obd.R
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,9 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.BluetoothSearching
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -71,7 +70,7 @@ fun ConnectScreen(
             ConnectionState.Disconnected -> {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = onScan) {
-                        Icon(Icons.Default.BluetoothSearching, contentDescription = null)
+                        Icon(painterResource(R.drawable.ic_bluetooth_searching), contentDescription = null)
                         Text("  Поиск")
                     }
                     if (state.preferredTransport == TransportType.CLASSIC_SPP) {
@@ -148,7 +147,7 @@ private fun DeviceRow(device: DiscoveredDevice, onClick: () -> Unit) {
             Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.Bluetooth, contentDescription = null)
+            Icon(painterResource(R.drawable.ic_bluetooth), contentDescription = null)
             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                 Text(device.name ?: "Без имени", style = MaterialTheme.typography.titleMedium)
                 Text(device.address, style = MaterialTheme.typography.bodySmall)

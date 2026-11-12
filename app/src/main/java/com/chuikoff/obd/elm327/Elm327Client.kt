@@ -56,6 +56,13 @@ class Elm327Client(
             minOf(BACKOFF_MAX_MS, BACKOFF_BASE_MS shl failures.coerceIn(0, 5))
 
         /** Cached stateful AT settings; longest prefixes first. */
+        /** Physical addressing of one ECU with explicit ISO-TP flow control (TX header, RX filter). */
+        fun ecuAddressing(tx: String, rx: String): List<String> =
+            listOf("ATSH$tx", "ATFCSH$tx", "ATFCSD30080A", "ATFCSM1", "ATCRA$rx")
+
+        /** Back to the engine ECU after TCM / AWC addressing (repeats are free thanks to the AT cache). */
+        val ENGINE_ADDRESSING: List<String> = ecuAddressing("7E0", "7E8")
+
         private val CACHED_AT = listOf("ATFCSH", "ATFCSD", "ATFCSM", "ATCRA", "ATSH", "ATST", "ATAT")
 
         /** "ATSH7E1" → ("ATSH", "7E1"); null for non-cached commands or a bare prefix (e.g. "ATCRA" = reset). */
@@ -206,11 +213,6 @@ class Elm327Client(
                 else atState[key.first] = key.second
             }
         }
-    }
-
-    suspend fun resetSession() = mutex.withLock {
-        initialized = false
-        atState.clear()
     }
 
     /**

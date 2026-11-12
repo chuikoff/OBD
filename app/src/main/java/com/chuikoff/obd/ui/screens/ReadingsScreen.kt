@@ -1,5 +1,7 @@
 package com.chuikoff.obd.ui.screens
 
+import com.chuikoff.obd.ui.copyText
+import com.chuikoff.obd.ui.shareText
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -20,11 +22,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
-import android.widget.Toast
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
@@ -160,7 +157,6 @@ private fun ReadingCard(reading: SensorReading) {
         TempColorScale.band(kind, reading.value) else null
     val valueColor = band?.let { Color(it.argb) }
     val cardTint = when {
-        reading.isPlaceholder -> MaterialTheme.colorScheme.secondaryContainer
         valueColor != null -> valueColor.copy(alpha = 0.12f)
         else -> MaterialTheme.colorScheme.surfaceVariant
     }
@@ -291,10 +287,10 @@ private fun CvtDebugCard(
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val pad = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)
-                OutlinedButton(onClick = { copyText(context, cvtExport()) }, modifier = Modifier.weight(1f), contentPadding = pad) {
+                OutlinedButton(onClick = { copyText(context, "CVT log", "CVT лог скопирован", cvtExport()) }, modifier = Modifier.weight(1f), contentPadding = pad) {
                     Text("Копировать (${log.size})", maxLines = 1, style = MaterialTheme.typography.labelMedium)
                 }
-                OutlinedButton(onClick = { shareText(context, cvtExport()) }, modifier = Modifier.weight(1f), contentPadding = pad) {
+                OutlinedButton(onClick = { shareText(context, "OBD Outlander — CVT лог", "Поделиться CVT логом", cvtExport()) }, modifier = Modifier.weight(1f), contentPadding = pad) {
                     Text("Поделиться", maxLines = 1, style = MaterialTheme.typography.labelMedium)
                 }
                 TextButton(onClick = onClearCvtLog, modifier = Modifier.weight(0.8f), contentPadding = pad) {
@@ -305,17 +301,4 @@ private fun CvtDebugCard(
     }
 }
 
-private fun copyText(context: Context, text: String) {
-    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-    cm.setPrimaryClip(ClipData.newPlainText("CVT log", text))
-    Toast.makeText(context, "CVT лог скопирован", Toast.LENGTH_SHORT).show()
-}
 
-private fun shareText(context: Context, text: String) {
-    val send = Intent(Intent.ACTION_SEND).apply {
-        type = "text/plain"
-        putExtra(Intent.EXTRA_SUBJECT, "OBD Outlander — CVT лог")
-        putExtra(Intent.EXTRA_TEXT, text)
-    }
-    context.startActivity(Intent.createChooser(send, "Поделиться CVT логом").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-}

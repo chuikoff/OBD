@@ -28,20 +28,8 @@ class OutlanderAmbientTempSensor : SensorDefinition {
     override val caveatRu: String = "AWC 210D — датчик с приборной панели"
 
     companion object {
-        private val AWC_PRE = listOf(
-            "ATSH7B6",
-            "ATFCSH7B6",
-            "ATFCSD30080A",
-            "ATFCSM1",
-            "ATCRA7B7"
-        )
-        private val ENGINE_POST = listOf(
-            "ATSH7E0",
-            "ATFCSH7E0",
-            "ATFCSD30080A",
-            "ATFCSM1",
-            "ATCRA7E8"
-        )
+        private val AWC_PRE = Elm327Client.ecuAddressing("7B6", "7B7")
+        private val ENGINE_POST = Elm327Client.ENGINE_ADDRESSING
 
         /** Torque letter I (0-based data index after `61 0D`). */
         const val AMBIENT_BYTE_INDEX = 8

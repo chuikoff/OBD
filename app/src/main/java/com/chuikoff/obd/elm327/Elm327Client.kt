@@ -30,6 +30,14 @@ class Elm327Client(
     private var badStreak = 0
     /** While true, NO DATA (unsupported PID probing) does not count toward the recovery streak. */
     @Volatile var tolerateNoData = false
+    /** >0 while probing unknown ECUs/PIDs: NO DATA is an answer, not a link failure (no ATZ recovery). */
+    private val probeDepth = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Run [block] with NO DATA tolerated (DTC scans, ATF probes, diagnostics sweeps). */
+    suspend fun <T> probing(block: suspend () -> T): T {
+        probeDepth.incrementAndGet()
+        try { return block() } finally { probeDepth.decrementAndGet() }
+    }
     private var recoveryFailures = 0
     private var lastRecoveryMs = 0L
     private val _linkNote = MutableStateFlow<String?>(null)
@@ -155,7 +163,8 @@ class Elm327Client(
     /** Count only data requests (AT commands answer OK even when the bus is dead). */
     private fun trackLocked(command: String, response: String) {
         if (command.trim().uppercase().startsWith("AT")) return
-        if (isLinkError(response) || (!tolerateNoData && isNoData(response))) badStreak++ else if (tolerateNoData && isNoData(response)) { /* probing */ } else {
+        val tolerant = tolerateNoData || probeDepth.get() > 0
+        if (isLinkError(response) || (!tolerant && isNoData(response))) badStreak++ else if (tolerant && isNoData(response)) { /* probing */ } else {
             badStreak = 0
             recoveryFailures = 0
             _linkNote.value = null
@@ -170,6 +179,7 @@ class Elm327Client(
         lastRecoveryMs = now
         recoveryFailures++
         _linkNote.value = "переподключение… (попытка $recoveryFailures)"
+        com.chuikoff.obd.diag.DiagLog.event("ELM: $BAD_STREAK_LIMIT плохих ответов подряд → ATZ + повторная инициализация (попытка $recoveryFailures)")
         dirty = false
         atState.clear()
         flushLocked(timeoutMs = 800)
@@ -193,9 +203,24 @@ class Elm327Client(
         if (key != null && atState[key.first] == key.second) return "OK"
 
         val payload = (trimmed + "\r").toByteArray(Charsets.US_ASCII)
-        transport.write(payload)
+        val t0 = System.currentTimeMillis()
+        try {
+            transport.write(payload)
+        } catch (e: Exception) {
+            com.chuikoff.obd.diag.DiagLog.exchange(trimmed, "", System.currentTimeMillis() - t0, "ошибка записи: ${e.message}")
+            throw e
+        }
         dirty = true // only once the bytes really left; a cancelled/failed write leaves the ELM idle
-        val response = transport.readUntilPrompt(timeoutMs)
+        val response = try {
+            transport.readUntilPrompt(timeoutMs)
+        } catch (e: Exception) {
+            com.chuikoff.obd.diag.DiagLog.exchange(trimmed, "", System.currentTimeMillis() - t0, "ошибка чтения: ${e.message}")
+            throw e
+        }
+        com.chuikoff.obd.diag.DiagLog.exchange(
+            trimmed, response, System.currentTimeMillis() - t0,
+            if (response.contains('>')) "ok" else "ТАЙМАУТ (нет >, лимит $timeoutMs мс)"
+        )
         if (response.contains('>')) dirty = false
         updateAtStateLocked(upper, key, response)
         return response

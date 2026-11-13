@@ -92,6 +92,10 @@ data class ObdUiState(
     /** Last 2110 attempt, also failed ones (raw for «Диагностика»). */
     val cvtOilAttempt: CvtOilDegradation.Result? = null,
     val cvtOilBusy: Boolean = false,
+    /** «Сохранить диагностику» in progress / last result. */
+    val diagBusy: Boolean = false,
+    val diagStatus: String? = null,
+    val diagSaved: com.chuikoff.obd.diag.DiagFile.Saved? = null,
     val cvtOilStatus: String? = null
 )
 
@@ -235,6 +239,22 @@ class ObdController private constructor(private val app: Application) {
         _ui.update { it.copy(cvtDebugExtra = enabled) }
     }
 
+    init {
+        // connection log for the diagnostics file: every status / error / state change
+        scope.launch {
+            var last: Triple<String, String?, String?>? = null
+            _ui.collect { st ->
+                val cur = Triple(st.connectionState::class.simpleName ?: "?", st.statusMessage, st.errorMessage)
+                if (cur != last) {
+                    last = cur
+                    com.chuikoff.obd.diag.DiagLog.event(
+                        "состояние=${cur.first}; статус=${cur.second ?: "—"}" + (cur.third?.let { "; ОШИБКА=$it" } ?: "")
+                    )
+                }
+            }
+        }
+    }
+
     fun clearCvtLog() = CvtDebugLog.clear()
 
     /** Plain-text export of the last ~50 CVT responses + context (coolant/ambient now). */
@@ -304,7 +324,8 @@ class ObdController private constructor(private val app: Application) {
     }
 
     /** DTC and passport reads share the bus: only one at a time (the buttons of the other tab stay enabled). */
-    private fun busExclusive(): Boolean = _ui.value.dtcBusy || _ui.value.passportBusy || _ui.value.cvtOilBusy
+    private fun busExclusive(): Boolean =
+        _ui.value.dtcBusy || _ui.value.passportBusy || _ui.value.cvtOilBusy || _ui.value.diagBusy
 
     fun passportExportText(): String =
         _ui.value.passport?.let { Passport.toText(it, com.chuikoff.obd.BuildConfig.VERSION_NAME) } ?: ""
@@ -569,7 +590,7 @@ class ObdController private constructor(private val app: Application) {
         val log = mutableListOf<com.chuikoff.obd.diag.DtcLogLine>()
         _ui.update {
             it.copy(dtcBusy = true, dtcError = null, dtcLog = emptyList(),
-                dtcStatus = if (full) "Полная проверка: опрос всех блоков (до ~30 с)…" else "Чтение ошибок OBD…")
+                dtcStatus = if (full) "Полная проверка: опрос всех блоков (~1 мин)…" else "Чтение ошибок OBD…")
         }
         scope.launch {
             try {
@@ -577,9 +598,9 @@ class ObdController private constructor(private val app: Application) {
                     val scanner = com.chuikoff.obd.diag.DtcScanner(client) { line ->
                         log += line
                         _ui.update { it.copy(dtcLog = log.toList()) }
-                        line.module?.let { m -> _ui.update { it.copy(dtcStatus = "Полная проверка: $m…") } }
                     }
-                    val report = if (full) scanner.full() else scanner.quick()
+                    val report = if (full) scanner.full { p -> _ui.update { it.copy(dtcStatus = "Полная проверка: $p…") } }
+                    else scanner.quick()
                     _ui.update {
                         it.copy(dtcReport = report, dtcScanned = true, dtcStatus = report.summaryRu(), dtcError = null,
                             dtcLog = log.toList())
@@ -670,6 +691,85 @@ class ObdController private constructor(private val app: Application) {
                 _ui.update { it.copy(dtcBusy = false) }
             }
         }
+    }
+
+    /**
+     * «Сохранить диагностику»: if connected, pause polling and actively read adapter info, responding
+     * ECUs / supported PIDs and (6AT profiles) a wide gearbox sweep; then write ONE .txt with all logs
+     * (DTC, gearbox/CVT, ELM traffic, connection events, readings, passport) and open the share sheet.
+     */
+    fun saveDiagnostics() {
+        if (_ui.value.diagBusy) return
+        if (busExclusive()) { _ui.update { it.copy(diagStatus = "Подождите: идёт другое чтение") }; return }
+        _ui.update { it.copy(diagBusy = true, diagStatus = "Сбор диагностики…") }
+        scope.launch {
+            try {
+                val client = elm
+                var adapter: List<com.chuikoff.obd.diag.DiagSweep.Line> = emptyList()
+                var gearbox: List<com.chuikoff.obd.diag.DiagSweep.Line> = emptyList()
+                if (client != null && _ui.value.connectionState is ConnectionState.Connected) {
+                    poller.paused(client) {
+                        val sweep = com.chuikoff.obd.diag.DiagSweep(client) { p -> _ui.update { it.copy(diagStatus = "Сбор диагностики: $p…") } }
+                        adapter = sweep.adapterInfo()
+                        if (_ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID) gearbox = sweep.gearbox()
+                    }
+                }
+                val text = diagnosticsText(adapter, gearbox)
+                val name = com.chuikoff.obd.diag.DiagFile.fileName()
+                val saved = withContext(Dispatchers.IO) { com.chuikoff.obd.diag.DiagFile.save(app, name, text) }
+                _ui.update { it.copy(diagSaved = saved, diagStatus = "Сохранено: ${saved.shownPath}") }
+                runCatching { com.chuikoff.obd.diag.DiagFile.share(app, saved) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _ui.update { it.copy(diagStatus = "Не удалось сохранить: ${e.message}") }
+            } finally {
+                _ui.update { it.copy(diagBusy = false) }
+            }
+        }
+    }
+
+    fun shareDiagnostics() {
+        _ui.value.diagSaved?.let { runCatching { com.chuikoff.obd.diag.DiagFile.share(app, it) } }
+    }
+
+    private fun diagnosticsText(
+        adapter: List<com.chuikoff.obd.diag.DiagSweep.Line>,
+        gearbox: List<com.chuikoff.obd.diag.DiagSweep.Line>
+    ): String = buildString {
+        val s = _ui.value
+        fun section(t: String) { append("\n\n===== ").append(t).append(" =====\n") }
+        append("OBD ${com.chuikoff.obd.BuildConfig.VERSION_NAME} (${com.chuikoff.obd.BuildConfig.VERSION_CODE}) — файл диагностики\n")
+        append("Создан: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", java.util.Locale.US).format(java.util.Date())}\n")
+        append("Телефон: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})\n")
+        append("Профиль: ${s.selectedProfile.displayNameRu} (${s.selectedProfile.id})\n")
+        append("Связь: ${s.connectionState::class.simpleName}, адаптер ${s.connectedAddress ?: s.lastAdapter?.address ?: "—"}, транспорт ${activeTransport?.name ?: "—"}\n")
+        append("Статус: ${s.statusMessage ?: "—"}${s.errorMessage?.let { " | ошибка: $it" } ?: ""}\n")
+        append("Поддерживаемые PID (двигатель): ${engineExtras.supported?.sorted()?.joinToString(" ") { "%02X".format(it) } ?: "не прочитаны"}\n")
+        com.chuikoff.obd.sensors.CretaAtf.selected?.let { append("АКПП источник: ${it.label} — ${it.sourceRu}\n") }
+            ?: append("АКПП источник: не найден (probed=${com.chuikoff.obd.sensors.CretaAtf.probed})\n")
+
+        section("ПОКАЗАНИЯ")
+        s.readings.forEach { r ->
+            append("${r.displayName} [${r.sensorId}]: ${r.displayText ?: r.value?.let { "%.1f".format(it) } ?: "—"} ${r.unit}")
+            r.error?.let { append(" | ошибка: $it") }
+            r.note?.let { append(" | $it") }
+            r.rawHex?.let { append(" | RAW $it") }
+            append('\n')
+        }
+        if (adapter.isNotEmpty()) { section("АДАПТЕР И ОТВЕЧАЮЩИЕ ЭБУ (прочитано сейчас)"); adapter.forEach { append(it.toText()).append('\n') } }
+        if (gearbox.isNotEmpty()) { section("КОРОБКА: ШИРОКИЙ ОПРОС 7E1/7E0 (прочитано сейчас)"); gearbox.forEach { append(it.toText()).append('\n') } }
+        section("ОШИБКИ (последняя проверка)")
+        append(if (s.dtcReport == null && s.dtcLog.isEmpty()) "проверку ещё не запускали\n" else dtcExportText())
+        section("ЛОГ КОРОБКИ / CVT")
+        append(cvtLogExportText())
+        section("ПАСПОРТ")
+        append(passportExportText().ifEmpty { "не читали" })
+        section("СОБЫТИЯ ПОДКЛЮЧЕНИЯ (${com.chuikoff.obd.diag.DiagLog.eventSnapshot().size})")
+        with(com.chuikoff.obd.diag.DiagLog) { eventSnapshot().forEach { append(it.toText()).append('\n') } }
+        val traffic = com.chuikoff.obd.diag.DiagLog.trafficSnapshot()
+        section("ВЕСЬ ОБМЕН С ELM (последние ${traffic.size} из ${com.chuikoff.obd.diag.DiagLog.TRAFFIC_CAPACITY})")
+        with(com.chuikoff.obd.diag.DiagLog) { traffic.forEach { append(it.toText()).append('\n') } }
     }
 
     private fun restartPolling() {

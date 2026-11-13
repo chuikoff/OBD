@@ -49,7 +49,9 @@ fun ReadingsScreen(
     onCvtFormula: (CvtFormula) -> Unit = {},
     onCvtDebugExtra: (Boolean) -> Unit = {},
     onClearCvtLog: () -> Unit = {},
-    cvtExport: () -> String = { "" }
+    cvtExport: () -> String = { "" },
+    onSaveDiag: () -> Unit = {},
+    onShareDiag: () -> Unit = {}
 ) {
     val showCvtDebug = state.selectedProfile.id == "mitsubishi_outlander_gf_gg"
     Column(
@@ -84,14 +86,14 @@ fun ReadingsScreen(
                         ReadingCard(reading)
                     }
                     item(key = "diagnostics") {
-                        DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport)
+                        DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag)
                     }
                 }
             }
         }
         if (showCvtDebug && state.connectionState !is ConnectionState.Connected && state.cvtLog.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
-            DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport)
+            DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag)
         }
     }
 }
@@ -104,7 +106,9 @@ private fun DiagnosticsBlock(
     onCvtFormula: (CvtFormula) -> Unit,
     onCvtDebugExtra: (Boolean) -> Unit,
     onClearCvtLog: () -> Unit,
-    cvtExport: () -> String
+    cvtExport: () -> String,
+    onSaveDiag: () -> Unit,
+    onShareDiag: () -> Unit
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
     Card(
@@ -116,6 +120,7 @@ private fun DiagnosticsBlock(
                 Text("Диагностика", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 TextButton(onClick = { open = !open }) { Text(if (open) "Свернуть" else "Развернуть") }
             }
+            DiagSaveCard(state, onSaveDiag, onShareDiag)
             if (open) {
                 if (showCvtDebug) {
                     Spacer(Modifier.height(8.dp))

@@ -6,20 +6,39 @@ import com.chuikoff.obd.elm327.Elm327Parser.toUnsigned
 /** Pure parsing of OBD Mode 03/07/0A/0101 and UDS 19 02 / KWP 18 replies (unit-tested). */
 object DtcDecode {
 
-    /** Hyundai/Kia CAN addressing (GDS), request id → reply id = +8. */
-    val HYUNDAI_MODULES = listOf(
-        DiagModule("Двигатель (ECM)", "7E0", "7E8"),
-        DiagModule("АКПП (TCM)", "7E1", "7E9"),
-        DiagModule("ABS / ESC", "7D1", "7D9"),
-        DiagModule("Подушки (SRS)", "7D2", "7DA"),
-        DiagModule("Электроусилитель руля (MDPS)", "7D4", "7DC"),
-        DiagModule("Приборная панель", "7C6", "7CE"),
-        DiagModule("Кузов (BCM)", "7A0", "7A8"),
-        DiagModule("Кузов / IPS", "770", "778"),
-        DiagModule("Климат", "7B3", "7BB"),
-        DiagModule("Датчики давления шин (TPMS)", "7D6", "7DE"),
-        DiagModule("Блок 7D0", "7D0", "7D8")
+    /** Known Hyundai/Kia CAN addresses (GDS), request id → reply id = +8. */
+    private val KNOWN = linkedMapOf(
+        "7E0" to "Двигатель (ECM)",
+        "7E1" to "АКПП (TCM)",
+        "7E2" to "Блок 7E2 (гибрид/доп.)",
+        "7D1" to "ABS / ESC",
+        "7D2" to "Подушки (SRS)",
+        "7D4" to "Электроусилитель руля (MDPS)",
+        "7C6" to "Приборная панель",
+        "7C4" to "Парктроник / камера",
+        "7A0" to "Кузов (BCM) / Smart key",
+        "770" to "Кузов / IPS",
+        "7B3" to "Климат",
+        "7D6" to "Датчики давления шин (TPMS)",
+        "7A5" to "Блок 7A5 (TPMS/иммобилайзер)",
+        "7D0" to "Блок 7D0",
+        "7A6" to "Блок 7A6",
+        "7B7" to "Блок 7B7 (сиденья/двери)",
+        "7C2" to "Блок 7C2 (подрулевой)",
+        "7D3" to "Блок 7D3"
     )
+
+    /**
+     * Full-check address list: the known modules first, then a sweep of the usual Hyundai/Kia
+     * diagnostic ranges (7A0–7A7, 7B0–7B7, 7C0–7C7, 7D0–7D7, 7E0–7E5, 770–777). Silent ones cost
+     * two short NO DATA.
+     */
+    val HYUNDAI_MODULES: List<DiagModule> = run {
+        val ids = LinkedHashSet<String>(KNOWN.keys)
+        listOf(0x7A0, 0x7B0, 0x7C0, 0x7D0, 0x770).forEach { base -> (0..7).forEach { ids += "%03X".format(base + it) } }
+        (0..5).forEach { ids += "%03X".format(0x7E0 + it) }
+        ids.map { tx -> DiagModule(KNOWN[tx] ?: "Блок $tx", tx, "%03X".format(tx.toInt(16) + 8)) }
+    }
 
     fun ecuName(id: String?): String = when (id?.uppercase()) {
         null -> "ЭБУ (адрес неизвестен)"
@@ -97,9 +116,12 @@ object DtcDecode {
     }
 
     /** KWP2000 58 N (hi lo status)* — or 7F 18 NRC. All listed codes are reported. */
-    fun parseKwp18(raw: String, module: DiagModule): Reply {
+    fun parseKwp18(raw: String, module: DiagModule): Reply = parseKwp(raw, module, 0x18)
+
+    /** KWP2000 18 (readDTCByStatus → 58) or 17 (readStatusOfDTC → 57): N, then (hi lo status)*. */
+    fun parseKwp(raw: String, module: DiagModule, sid: Int): Reply {
         val msgs = Elm327Parser.assemble(raw).filter { it.bytes.isNotEmpty() }
-        msgs.firstOrNull { it.bytes.size >= 2 && toUnsigned(it.bytes[0]) == 0x58 }?.let { m ->
+        msgs.firstOrNull { it.bytes.size >= 2 && toUnsigned(it.bytes[0]) == sid + 0x40 }?.let { m ->
             val n = toUnsigned(m.bytes[1])
             val codes = m.bytes.drop(2).take(n * 3).chunked(3).filter { it.size == 3 }.mapNotNull { g ->
                 val st = toUnsigned(g[2])
@@ -108,7 +130,7 @@ object DtcDecode {
             }.distinctBy { it.code }
             return Reply.Codes(codes, 0)
         }
-        return negativeOr(msgs, 0x18)
+        return negativeOr(msgs, sid)
     }
 
     fun kwpStatusRu(s: Int): String {

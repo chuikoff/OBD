@@ -104,15 +104,24 @@ class CretaAtfTest {
         assertEquals("ATSH7E0", t.sent.last { it.startsWith("ATSH") }) // engine addressing restored
     }
 
-    @Test fun silentTcmHidesCard() = runBlocking {
-        val (c, _) = elm { _, _ -> "NO DATA\r\r>" }
+    @Test fun silentTcmKeepsCardWithHintAndNeverTriggersAtzRecovery() = runBlocking {
+        val (c, t) = elm { _, _ -> "NO DATA\r\r>" }
         c.ensureInitialized()
-        val r = CretaAtfSensor().read(c)
+        val atz = t.sent.count { it == "ATZ" }
+        val s = CretaAtfSensor()
+        val r = s.read(c)
         assertNull(r.value)
         assertTrue(CretaAtf.absent)
-        assertFalse(Creta2018Profile().sensors().any { it.id == CretaAtf.SENSOR_ID })
-        CretaAtf.reset()
+        assertTrue(r.error!!.contains("Сохранить диагностику"))
+        // card stays on the Creta so the user sees why
         assertNotNull(Creta2018Profile().sensors().firstOrNull { it.id == CretaAtf.SENSOR_ID })
+        // later ticks: no bus traffic until re-probe
+        val mark = t.sent.size
+        s.read(c)
+        assertTrue(t.sentAfter(mark).none { !it.startsWith("AT") })
+        // 6+ NO DATA in a probe must not count as a dead link (1.14.1 bug: ATZ mid-probe)
+        c.send("0105")
+        assertEquals(atz, t.sent.count { it == "ATZ" })
     }
 
     @Test fun answeringTcmWithoutPlausibleValueKeepsCardWithError() = runBlocking {

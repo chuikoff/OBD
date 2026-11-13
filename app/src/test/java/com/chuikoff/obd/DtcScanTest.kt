@@ -62,6 +62,20 @@ class DtcScanTest {
         assertTrue(ok is DtcDecode.Reply.Codes)
     }
 
+    @Test fun moduleSweepCoversHyundaiRanges() {
+        val ids = DtcDecode.HYUNDAI_MODULES.map { it.tx }
+        assertEquals(ids.size, ids.toSet().size)
+        listOf("7E0", "7E1", "7D1", "7D2", "7D4", "7C6", "7C4", "7A0", "770", "7B3", "7D6", "7A3", "775").forEach {
+            assertTrue(it, it in ids)
+        }
+        assertTrue(DtcDecode.HYUNDAI_MODULES.all { it.rx.toInt(16) == it.tx.toInt(16) + 8 })
+    }
+
+    @Test fun kwp17() {
+        val r = DtcDecode.parseKwp("5701433501\r\r>", abs, 0x17) as DtcDecode.Reply.Codes
+        assertEquals("C0335", r.codes.single().code)
+    }
+
     @Test fun kwp18() {
         val r = DtcDecode.parseKwp18("58019602E0\r\r>", abs) as DtcDecode.Reply.Codes
         assertEquals("B1602", r.codes.single().code)
@@ -92,8 +106,14 @@ class DtcScanTest {
         }
         val c = Elm327Client(t)
         c.ensureInitialized()
+        val atz = t.sent.count { it == "ATZ" }
         val log = mutableListOf<DtcLogLine>()
         val rep = DtcScanner(c) { log += it }.full()
+        // dozens of NO DATA from silent addresses must not trigger ATZ recovery mid-scan
+        assertEquals(atz, t.sent.count { it == "ATZ" })
+        // rejected 19 02 FF → masks 08/09 tried, then KWP
+        assertTrue(log.any { it.request == "190209" && it.module!!.contains("7D2") })
+        assertTrue(log.any { it.request == "== ИТОГ" && it.module!!.contains("7C6") && it.rawVisible == "не ответил" })
         assertEquals(false, rep.milOn)
         assertTrue(rep.obdCodes.isEmpty())
         val mods = rep.modules!!.associateBy { it.module.tx }

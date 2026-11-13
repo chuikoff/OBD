@@ -46,7 +46,9 @@ fun DiagnosticsScreen(
     onRead: () -> Unit,
     onFull: () -> Unit,
     exportText: () -> String,
-    onClearConfirmed: () -> Unit
+    onClearConfirmed: () -> Unit,
+    onSaveDiag: () -> Unit = {},
+    onShareDiag: () -> Unit = {}
 ) {
     var showClearDialog by remember { mutableStateOf(false) }
     val connected = state.connectionState is ConnectionState.Connected
@@ -72,11 +74,12 @@ fun DiagnosticsScreen(
             }
             Text(
                 "Быстрая — коды двигателя/коробки по OBD (Check Engine). Полная — ещё ABS/ESP, подушки, руль, " +
-                    "приборка, кузов, климат, TPMS (~20–40 с).",
+                    "приборка, кузов, климат, TPMS и перебор всех адресов Hyundai/Kia (~1 мин).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        item { DiagSaveCard(state, onSaveDiag, onShareDiag) }
         state.dtcStatus?.let { item { Text(it, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium) } }
         state.dtcError?.let {
             item { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }

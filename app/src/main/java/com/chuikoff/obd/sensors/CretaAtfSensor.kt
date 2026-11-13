@@ -127,7 +127,9 @@ class CretaAtfSensor : SensorDefinition {
     override val unit: String = "°C"
     override val caveatRu: String = "Экспериментально: A6GF1, ScanGauge 21A0@7E1 / 22 2081, X−40"
 
-    override suspend fun read(client: Elm327Client): SensorReading {
+    override suspend fun read(client: Elm327Client): SensorReading = client.probing { readTolerant(client) }
+
+    private suspend fun readTolerant(client: Elm327Client): SensorReading {
         try {
             return if (!CretaAtf.probed) probe(client) else poll(client, CretaAtf.selected)
         } catch (e: CancellationException) {
@@ -154,7 +156,7 @@ class CretaAtfSensor : SensorDefinition {
             val raw = rawByReq.getOrPut(reqKey) { exchange(client, c.tx, c.rx, c.request) }
             val p = CretaAtf.payload(raw, c.layout)
             payloads[c] = p
-            if (c.tx == "7E1" && answered(raw)) tcmAnswered = true
+            if (answered(raw)) tcmAnswered = true
             log("probe ${c.label}", raw, p, CretaAtf.decode(p, c), c.sourceRu)
         }
         for ((tx, req) in CretaAtf.RAW_ONLY) {
@@ -167,7 +169,7 @@ class CretaAtfSensor : SensorDefinition {
         if (sel == null) {
             return error(
                 if (tcmAnswered) "АКПП отвечает, но ни один вариант не дал правдоподобной температуры — пришлите лог CVT из «Диагностики»"
-                else "Блок АКПП (7E1) не ответил",
+                else "Блок АКПП (7E1/7E0) не ответил — нажмите «Сохранить диагностику» и пришлите файл",
                 rawByReq.values.joinToString(" | ") { Elm327Parser.clean(it) }
             )
         }
@@ -176,7 +178,11 @@ class CretaAtfSensor : SensorDefinition {
     }
 
     private suspend fun poll(client: Elm327Client, c: CretaAtf.Candidate?): SensorReading {
-        if (c == null) return error("Блок АКПП (7E1) не ответил", null)
+        if (c == null) {
+            // nothing found this connection: no bus traffic, re-probe after REPROBE_AFTER ticks
+            CretaAtf.markResult(false)
+            return error("Температура не найдена — «Сохранить диагностику» (вкладка «Ошибки») и пришлите файл", null)
+        }
         val raw = exchange(client, c.tx, c.rx, c.request)
         val p = CretaAtf.payload(raw, c.layout)
         val v = CretaAtf.decode(p, c)

@@ -1,7 +1,6 @@
 package com.chuikoff.obd.vehicle
 
 import com.chuikoff.obd.sensors.CoolantTempSensor
-import com.chuikoff.obd.sensors.CretaAtf
 import com.chuikoff.obd.sensors.CretaAtfSensor
 import com.chuikoff.obd.sensors.Mode01TempSensor
 import com.chuikoff.obd.sensors.SensorDefinition
@@ -12,7 +11,7 @@ import com.chuikoff.obd.sensors.SensorDefinition
  * Coolant: SAE 0105.
  * Gearbox (ATF) temperature: [CretaAtfSensor] — EXPERIMENTAL, ScanGauge candidates probed once
  *  per connection (21A0@7E1 byte 13 / 33, 22 2081@7E1, 21A0@7E0), RAW of every probe in the CVT log.
- *  Hidden when the TCM does not answer at all.
+ *  Always shown (with an error text when nothing was found).
  * Ambient: SAE 0146 only (may differ from cluster; no intake 010F as outdoor).
  */
 class Creta2018Profile : VehicleProfile {
@@ -26,7 +25,7 @@ class Creta2018Profile : VehicleProfile {
 
     override fun sensors(): List<SensorDefinition> = listOfNotNull(
         CoolantTempSensor(),
-        CretaAtfSensor().takeIf { !CretaAtf.absent },
+        CretaAtfSensor(), // always shown on the Creta (6AT): an error text beats a missing card
         CretaAmbientTempSensor()
     )
 }

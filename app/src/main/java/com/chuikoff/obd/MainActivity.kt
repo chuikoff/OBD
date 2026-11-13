@@ -164,14 +164,18 @@ fun ObdApp(vm: ObdController, onEnsurePermissions: () -> Unit = {}) {
                     onCvtFormula = vm::setCvtFormula,
                     onCvtDebugExtra = vm::setCvtDebugExtra,
                     onClearCvtLog = vm::clearCvtLog,
-                    cvtExport = vm::cvtLogExportText
+                    cvtExport = vm::cvtLogExportText,
+                    onSaveDiag = vm::saveDiagnostics,
+                    onShareDiag = vm::shareDiagnostics
                 )
                 2 -> DiagnosticsScreen(
                     state = state,
                     onRead = vm::readDtcs,
                     onFull = vm::readDtcsFull,
                     exportText = vm::dtcExportText,
-                    onClearConfirmed = { vm.clearDtcs(confirmed = true) }
+                    onClearConfirmed = { vm.clearDtcs(confirmed = true) },
+                    onSaveDiag = vm::saveDiagnostics,
+                    onShareDiag = vm::shareDiagnostics
                 )
                 3 -> PassportScreen(state, onRefresh = vm::readPassport, exportText = vm::passportExportText,
                     onReadCvtOil = vm::readCvtOil)

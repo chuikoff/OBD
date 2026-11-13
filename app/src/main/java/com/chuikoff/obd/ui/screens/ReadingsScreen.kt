@@ -120,6 +120,9 @@ private fun DiagnosticsBlock(
                 if (showCvtDebug) {
                     Spacer(Modifier.height(8.dp))
                     CvtDebugCard(state, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport)
+                } else if (state.cvtLog.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    GearboxLogCard(state, onClearCvtLog, cvtExport)
                 }
                 state.readings.forEach { r ->
                     Spacer(Modifier.height(8.dp))
@@ -225,6 +228,36 @@ private fun ReadingCard(reading: SensorReading) {
     }
 }
 
+
+/** 6AT (Creta) ATF probe log: every candidate's RAW, copy/share to pick the right byte. */
+@Composable
+private fun GearboxLogCard(state: ObdUiState, onClearCvtLog: () -> Unit, cvtExport: () -> String) {
+    val context = LocalContext.current
+    val log = state.cvtLog
+    val small = MaterialTheme.typography.labelSmall
+    Column(Modifier.fillMaxWidth()) {
+        Text("Лог коробки (экспериментально)", style = MaterialTheme.typography.titleMedium)
+        log.filter { it.request.contains("probe") || it.request.contains("raw ") }.takeLast(6).forEach { e ->
+            Text(
+                "${e.request} → ${e.valueC?.let { "%.0f °C".format(it) } ?: "—"} · ${e.candidates ?: e.frameSummary}",
+                style = small, fontFamily = FontFamily.Monospace
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val pad = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)
+            OutlinedButton(onClick = { copyText(context, "Gearbox log", "Лог коробки скопирован", cvtExport()) }, modifier = Modifier.weight(1f), contentPadding = pad) {
+                Text("Копировать (${log.size})", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+            }
+            OutlinedButton(onClick = { shareText(context, "OBD — лог коробки", "Поделиться логом коробки", cvtExport()) }, modifier = Modifier.weight(1f), contentPadding = pad) {
+                Text("Поделиться", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+            }
+            TextButton(onClick = onClearCvtLog, modifier = Modifier.weight(0.8f), contentPadding = pad) {
+                Text("Очистить", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
 
 /** CVT diagnostics: last frame decode, formula choice, copy/share of the last ~50 raw replies. */
 @Composable

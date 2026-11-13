@@ -16,7 +16,6 @@ class EngineExtrasTest {
     @Test fun math() {
         assertEquals(850, EngineMath.rpm(0x0D, 0x48))
         assertEquals(2.5, EngineMath.mafGs(0x00, 0xFA), 1e-9)
-        assertEquals(100.0, EngineMath.loadPercent(255), 1e-9)
         assertEquals(14.2, EngineMath.moduleVoltage(0x37, 0x78), 1e-9)
         // idle MAF 2.5 g/s → ≈0.82 L/h
         val lph = EngineMath.litersPerHour(2.5)
@@ -91,9 +90,15 @@ class EngineExtrasTest {
         assertEquals(VoltageScale.GREEN, v.valueArgb)
         val f = byId.getValue(EngineExtras.ID_FUEL).read(c)
         assertEquals("5.5 л/100км", f.displayText) // MAF 10 g/s at 60 km/h
-        // 0104 answers NO DATA → hidden after 3 tries
-        repeat(EngineExtras.MAX_NO_DATA) { byId.getValue(EngineExtras.ID_LOAD).read(c) }
-        assertTrue(EngineExtras.ID_LOAD !in x.sensors().map { it.id })
+        // engine load (0104) is never polled, even when supported
+        assertTrue("engine_load" !in x.sensors().map { it.id })
+        // a PID that answers NO DATA → hidden after 3 tries
+        val dead = EngineExtras()
+        dead.reset(setOf(0x0C))
+        val rpmDead = dead.sensors().first { it.id == EngineExtras.ID_RPM }
+        val c2 = elm(emptyMap())
+        repeat(EngineExtras.MAX_NO_DATA) { rpmDead.read(c2) }
+        assertTrue(EngineExtras.ID_RPM !in dead.sensors().map { it.id })
     }
 
     @Test fun idleFuelInLitersPerHourAndAtrvFallback() = runBlocking {
@@ -129,7 +134,7 @@ class EngineExtrasTest {
         }
         // RPM every other extra slot, the rest round-robin
         val seq = (2..24 step 2).map { Poller.extraForTick(extras, it, true)!!.id }
-        assertEquals(listOf("rpm", "voltage", "rpm", "engine_load", "rpm", "fuel_rate"), seq.take(6))
+        assertEquals(listOf("rpm", "voltage", "rpm", "fuel_rate", "rpm", "voltage"), seq.take(6))
         assertNull(Poller.extraForTick(emptyList(), 2, true))
     }
 }

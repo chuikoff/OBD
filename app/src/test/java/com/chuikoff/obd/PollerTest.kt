@@ -65,10 +65,10 @@ class PollerTest {
         waitFor { t.sent.contains("2103") } // tick 1 = CVT only, reply still in flight
         val mark = t.sent.size
 
-        val codes = p.paused(c) { c.readStoredDtcs().first }
+        val codes = p.paused(c) { com.chuikoff.obd.diag.DtcScanner(c) {}.quick().obdCodes }
 
         val after = t.sentAfter(mark)
-        assertEquals(emptyList<String>(), codes)
+        assertTrue("$codes", codes.isEmpty())
         // the late 2103 reply was drained: no bare CR (would repeat 2103) and no interrupt needed
         assertTrue("$after", after.none { it.isBlank() })
         // engine addressing restored first (tick left TCM 7E1), default flow control before Mode 03

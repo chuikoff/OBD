@@ -78,7 +78,7 @@ class Elm327ClientIoTest {
         c.ensureInitialized()
         c.send("ATFCSH7E1"); c.send("ATFCSM1")
         val mark = t.sent.size
-        c.readStoredDtcs()
+        com.chuikoff.obd.diag.DtcScanner(c) {}.quick()
         val after = t.sentAfter(mark)
         assertTrue(after.contains("ATFCSM0"))
         assertTrue(after.indexOf("ATFCSM0") < after.indexOf("03"))

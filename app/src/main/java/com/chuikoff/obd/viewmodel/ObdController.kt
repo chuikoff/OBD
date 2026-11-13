@@ -26,6 +26,7 @@ import com.chuikoff.obd.passport.PassportReader
 import com.chuikoff.obd.polling.Poller
 import com.chuikoff.obd.sensors.CvtDebugEntry
 import com.chuikoff.obd.sensors.CvtDebugLog
+import com.chuikoff.obd.sensors.CretaAtf
 import com.chuikoff.obd.sensors.CvtFormula
 import com.chuikoff.obd.sensors.CvtSettings
 import com.chuikoff.obd.sensors.CvtLockupDetector
@@ -64,8 +65,8 @@ data class ObdUiState(
     val statusMessage: String? = null,
     val errorMessage: String? = null,
     // Diagnostics
-    val dtcCodes: List<String> = emptyList(),
-    val dtcPending: List<String> = emptyList(),
+    val dtcReport: com.chuikoff.obd.diag.DtcReport? = null,
+    val dtcLog: List<com.chuikoff.obd.diag.DtcLogLine> = emptyList(),
     val dtcStatus: String? = null,
     val dtcError: String? = null,
     val dtcBusy: Boolean = false,
@@ -249,6 +250,8 @@ class ObdController private constructor(private val app: Application) {
             s.readings.find { it.sensorId == "ambient_temp" }?.rawValue?.let { append(" (датчик %.0f)".format(it)) }
             append(", ")
             append("CVT (на экране) ${r("cvt_temp")?.let { "%.1f".format(it) } ?: "—"} °C")
+            r(CretaAtf.SENSOR_ID)?.let { append(", АКПП (на экране) %.0f °C".format(it)) }
+            CretaAtf.selected?.let { append("\nАКПП источник: ${it.label} — ${it.sourceRu}") }
         }
         return CvtDebugLog.exportText(header)
     }
@@ -308,6 +311,7 @@ class ObdController private constructor(private val app: Application) {
 
     fun selectProfile(profile: VehicleProfile) {
         _ui.update { it.copy(selectedProfile = profile) }
+        CretaAtf.reset()
         if (_ui.value.connectionState is ConnectionState.Connected) {
             restartPolling()
         }
@@ -407,6 +411,7 @@ class ObdController private constructor(private val app: Application) {
             cvtTempSmoother.reset()
             cvtLockup.reset()
             CvtPollPace.reset()
+            CretaAtf.reset()
             lastCvtStatusLine = null
             lastCvtStatusArgb = null
             resetAmbient()
@@ -466,8 +471,7 @@ class ObdController private constructor(private val app: Application) {
                         errorMessage = null,
                         statusMessage = "ELM327 готов (${transport.name})" + if (auto) " — автоподключение" else "",
                         dtcScanned = false,
-                        dtcCodes = emptyList(),
-                        dtcPending = emptyList()
+                        dtcReport = null
                     )
                 }
                 publishLive(connected = true, status = "ELM327 готов")
@@ -527,6 +531,7 @@ class ObdController private constructor(private val app: Application) {
             cvtTempSmoother.reset()
             cvtLockup.reset()
             CvtPollPace.reset()
+            CretaAtf.reset()
             lastCvtStatusLine = null
             lastCvtStatusArgb = null
             resetAmbient()
@@ -536,8 +541,7 @@ class ObdController private constructor(private val app: Application) {
                     connectedAddress = null,
                     isPolling = false,
                     readings = emptyList(),
-                    dtcCodes = emptyList(),
-                    dtcPending = emptyList(),
+                    dtcReport = null,
                     dtcStatus = null,
                     dtcError = null,
                     dtcScanned = false,
@@ -549,52 +553,69 @@ class ObdController private constructor(private val app: Application) {
         }
     }
 
-    /** Mode 03 + Mode 07 DTC read. Polling is paused (joined) for the duration. */
-    fun readDtcs() {
+    /** Quick OBD check (0101 + 03 + 07 + 0A, all ECUs). Polling is paused (joined) for the duration. */
+    fun readDtcs() = runDtc(full = false)
+
+    /** Full check: quick + UDS/KWP DTC read of every known module (engine, TCM, ABS, SRS, cluster, BCM…). */
+    fun readDtcsFull() = runDtc(full = true)
+
+    private fun runDtc(full: Boolean) {
         val client = elm
         if (client == null || _ui.value.connectionState !is ConnectionState.Connected) {
             _ui.update { it.copy(dtcError = "Нет подключения") }
             return
         }
         if (busExclusive()) return
-        _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Чтение DTC…") }
+        val log = mutableListOf<com.chuikoff.obd.diag.DtcLogLine>()
+        _ui.update {
+            it.copy(dtcBusy = true, dtcError = null, dtcLog = emptyList(),
+                dtcStatus = if (full) "Полная проверка: опрос всех блоков (до ~30 с)…" else "Чтение ошибок OBD…")
+        }
         scope.launch {
             try {
                 poller.paused(client) {
-                    val (stored, rawStored) = client.readStoredDtcs()
-                    val (pending, rawPending) = try {
-                        client.readPendingDtcs()
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        emptyList<String>() to ""
+                    val scanner = com.chuikoff.obd.diag.DtcScanner(client) { line ->
+                        log += line
+                        _ui.update { it.copy(dtcLog = log.toList()) }
+                        line.module?.let { m -> _ui.update { it.copy(dtcStatus = "Полная проверка: $m…") } }
                     }
-                    runCatching { client.restoreEngineEcuFilter() }
-                    val nodataHint = when {
-                        stored.isEmpty() && pending.isEmpty() &&
-                            (rawStored.contains("NODATA") || rawPending.contains("NODATA") ||
-                                rawStored.isBlank()) ->
-                            " (NODATA = кодов нет)"
-                        else -> ""
-                    }
+                    val report = if (full) scanner.full() else scanner.quick()
                     _ui.update {
-                        it.copy(
-                            dtcCodes = stored,
-                            dtcPending = pending,
-                            dtcScanned = true,
-                            dtcStatus = "Сохранённые: ${stored.size}, pending: ${pending.size}$nodataHint" +
-                                if (rawStored.isNotBlank()) " | raw03=$rawStored" else "",
-                            dtcError = null
-                        )
+                        it.copy(dtcReport = report, dtcScanned = true, dtcStatus = report.summaryRu(), dtcError = null,
+                            dtcLog = log.toList())
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _ui.update { it.copy(dtcError = e.message ?: "Ошибка чтения DTC") }
+                _ui.update { it.copy(dtcError = e.message ?: "Ошибка чтения DTC", dtcLog = log.toList()) }
             } finally {
                 _ui.update { it.copy(dtcBusy = false) }
             }
+        }
+    }
+
+    fun dtcExportText(): String {
+        val s = _ui.value
+        return buildString {
+            append("OBD ${com.chuikoff.obd.BuildConfig.VERSION_NAME} — ошибки (DTC)\n")
+            append("Профиль: ${s.selectedProfile.displayNameRu}\n")
+            s.dtcReport?.let { r ->
+                append(r.summaryRu()).append("\n")
+                r.mil.forEach { append("MIL ${it.ecuId ?: "?"}: ${if (it.milOn) "ГОРИТ" else "нет"}, кодов ${it.dtcCount}\n") }
+                r.allCodes.forEach { c ->
+                    append("${c.code} — ${c.ecuName} — ${c.kind.titleRu}${c.statusRu?.let { " — $it" } ?: ""}\n")
+                }
+                r.modules?.forEach { m ->
+                    append("[${m.module.tx}→${m.module.rx}] ${m.module.name}: ")
+                    append(if (!m.answered) "не ответил" else "${m.protocol ?: "—"}, кодов ${m.codes.size}" +
+                        (if (m.ignored > 0) ", неактивных ${m.ignored}" else ""))
+                    m.note?.let { append(" ($it)") }
+                    append("\n")
+                }
+            }
+            append("\nRAW (${s.dtcLog.size}):\n")
+            s.dtcLog.forEach { append(it.toText()).append("\n") }
         }
     }
 
@@ -610,32 +631,33 @@ class ObdController private constructor(private val app: Application) {
         }
         if (busExclusive()) return
         _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Сброс DTC (Mode 04)…") }
+        val log = mutableListOf<com.chuikoff.obd.diag.DtcLogLine>()
         scope.launch {
             try {
                 poller.paused(client) {
                     val raw = client.clearDtcs()
+                    log += com.chuikoff.obd.diag.DtcLogLine(System.currentTimeMillis(), null, "04", Elm327Parser.visibleRaw(raw))
                     val cleaned = Elm327Parser.clean(raw)
                     val hex = Elm327Parser.hexDigits(raw)
                     if (hex.contains("7F") && !hex.contains("44")) {
                         runCatching { client.restoreEngineEcuFilter() }
                         _ui.update {
-                            it.copy(dtcStatus = "Сброс отклонён ЭБУ (условия). Ответ: $cleaned", dtcError = null)
+                            it.copy(dtcStatus = "Сброс отклонён ЭБУ (условия). Ответ: $cleaned", dtcError = null,
+                                dtcLog = log.toList())
                         }
                     } else {
-                        val (stored, _) = runCatching { client.readStoredDtcs() }
-                            .getOrElse { emptyList<String>() to "" }
-                        val (pending, _) = runCatching { client.readPendingDtcs() }
-                            .getOrElse { emptyList<String>() to "" }
-                        runCatching { client.restoreEngineEcuFilter() }
+                        val report = runCatching {
+                            com.chuikoff.obd.diag.DtcScanner(client) { log += it }.quick()
+                        }.getOrNull()
                         val status = if (hex.contains("44")) "DTC сброшены. Ответ: $cleaned"
                         else "Ответ сброса неоднозначен: $cleaned (коды перечитаны)"
                         _ui.update {
                             it.copy(
-                                dtcCodes = stored,
-                                dtcPending = pending,
-                                dtcScanned = true,
-                                dtcStatus = status,
-                                dtcError = null
+                                dtcReport = report ?: it.dtcReport,
+                                dtcScanned = report != null || it.dtcScanned,
+                                dtcStatus = status + (report?.let { r -> "\n" + r.summaryRu() } ?: ""),
+                                dtcError = null,
+                                dtcLog = log.toList()
                             )
                         }
                     }
@@ -821,7 +843,7 @@ class ObdController private constructor(private val app: Application) {
             return r.value
         }
         val settings = _ui.value.alertSettings
-        alertEngine.update(settings, fresh("cvt_temp"), fresh("coolant_temp"), fresh("ambient_temp"), now)
+        alertEngine.update(settings, fresh("cvt_temp") ?: fresh(CretaAtf.SENSOR_ID), fresh("coolant_temp"), fresh("ambient_temp"), now)
             .forEach { AlertNotifier.show(app, it, settings) }
         // ATRV voltage is measured by the adapter itself → not an ECU answer
         checkIgnition(readings.any {
@@ -1034,7 +1056,7 @@ class ObdController private constructor(private val app: Application) {
     private fun publishLiveFromReadings(readings: List<SensorReading>, connected: Boolean) {
         fun byId(id: String) = readings.find { it.sensorId == id }
         val coolant = byId("coolant_temp")
-        val cvt = byId("cvt_temp")
+        val cvt = byId("cvt_temp") ?: byId(CretaAtf.SENSOR_ID)
         val ambient = byId("ambient_temp")
         publishLive(
             connected = connected,
@@ -1071,7 +1093,8 @@ class ObdController private constructor(private val app: Application) {
             ambientC = ambientC,
             ambientNote = ambientNote,
             cvtLockup = cvtLockup,
-            engine = engine
+            engine = engine,
+            gearboxTitle = if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) "CVT" else "Коробка"
         )
     }
 

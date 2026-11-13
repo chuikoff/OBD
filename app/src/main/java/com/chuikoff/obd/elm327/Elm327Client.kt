@@ -239,22 +239,6 @@ class Elm327Client(
         runCatching { send("ATCRA7E8", timeoutMs = 2000) }
     }
 
-    /** Mode 03 — stored DTCs. */
-    suspend fun readStoredDtcs(): Pair<List<String>, String> {
-        prepareStandardObdBus()
-        val raw = send("03", timeoutMs = 5000)
-        val codes = Elm327Parser.parseDtcList(raw)
-        return codes to Elm327Parser.clean(raw)
-    }
-
-    /** Mode 07 — pending DTCs. */
-    suspend fun readPendingDtcs(): Pair<List<String>, String> {
-        prepareStandardObdBus()
-        val raw = send("07", timeoutMs = 5000)
-        val codes = Elm327Parser.parseDtcList(raw)
-        return codes to Elm327Parser.clean(raw)
-    }
-
     /** Mode 04 — clear DTCs / MIL. */
     suspend fun clearDtcs(): String {
         prepareStandardObdBus()

@@ -110,7 +110,7 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
             )
             .addRow(
                 Row.Builder()
-                    .setTitle("CVT")
+                    .setTitle(snap.gearboxTitle)
                     .addText(fmt(TempColorScale.Kind.CVT, snap.cvtC))
                     .apply { snap.cvtLockup?.let { addText(it) } }
                     .build()

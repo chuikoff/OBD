@@ -169,6 +169,8 @@ fun ObdApp(vm: ObdController, onEnsurePermissions: () -> Unit = {}) {
                 2 -> DiagnosticsScreen(
                     state = state,
                     onRead = vm::readDtcs,
+                    onFull = vm::readDtcsFull,
+                    exportText = vm::dtcExportText,
                     onClearConfirmed = { vm.clearDtcs(confirmed = true) }
                 )
                 3 -> PassportScreen(state, onRefresh = vm::readPassport, exportText = vm::passportExportText,

@@ -32,7 +32,7 @@ object TempColorScale {
     /** Which scale applies to a reading (all profiles). */
     fun kindFor(sensorId: String, displayName: String = ""): Kind? {
         when (sensorId) {
-            "cvt_temp" -> return Kind.CVT
+            "cvt_temp", "atf_temp" -> return Kind.CVT
             "coolant_temp" -> return Kind.COOLANT
             "ambient_temp" -> return Kind.AMBIENT
         }

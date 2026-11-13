@@ -438,23 +438,6 @@ object Elm327Parser {
     }
 
     /**
-     * Parse Mode 03 (stored) or Mode 07 (pending) DTC list from reassembled ECU messages.
-     * CAN (ISO 15765) reply: `43|47`, **count byte**, then 2 bytes per DTC (SAE J2012 packing).
-     * Several ECUs (7E8 engine, 7E9 TCM) → several messages; each is decoded on its own.
-     */
-    fun parseDtcList(raw: String): List<String> {
-        if (clean(raw).contains("NODATA")) return emptyList()
-        return assemble(raw)
-            .filter { it.bytes.size >= 2 && toUnsigned(it.bytes[0]).let { s -> s == 0x43 || s == 0x47 } }
-            .flatMap { m ->
-                val count = toUnsigned(m.bytes[1])
-                m.bytes.drop(2).take(count * 2).chunked(2).filter { it.size == 2 }
-                    .mapNotNull { formatDtc(toUnsigned(it[0]), toUnsigned(it[1])) }
-            }
-            .distinct()
-    }
-
-    /**
      * SAE J2012 packing of two DTC bytes into P0xxx / C0xxx / B0xxx / U0xxx.
      */
     fun formatDtc(high: Int, low: Int): String? {

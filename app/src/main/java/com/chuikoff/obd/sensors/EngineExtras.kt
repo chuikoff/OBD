@@ -15,7 +15,6 @@ object EngineMath {
 
     fun mafGs(a: Int, b: Int): Double = (a * 256 + b) / 100.0
     fun rpm(a: Int, b: Int): Int = (a * 256 + b) / 4
-    fun loadPercent(a: Int): Double = a * 100.0 / 255.0
     fun moduleVoltage(a: Int, b: Int): Double = (a * 256 + b) / 1000.0
 
     fun litersPerHour(mafGs: Double): Double = mafGs * 3600.0 / (AFR_GASOLINE * GASOLINE_DENSITY_G_PER_L)
@@ -68,7 +67,7 @@ object VoltageScale {
 }
 
 /**
- * Extra engine cards (voltage, RPM, load, fuel) — shared state for one connection: which PIDs the
+ * Extra engine cards (voltage, RPM, fuel) — shared state for one connection: which PIDs the
  * engine ECU supports, the last RPM (engine running?) and speed. Only supported PIDs are shown;
  * a PID that answers NO DATA [MAX_NO_DATA] times in a row is hidden until the next connection.
  */
@@ -96,9 +95,8 @@ class EngineExtras {
 
     private val voltage = Extra(ID_VOLTAGE, "Напряжение", "В", pid = null) { c -> readVoltage(c) }
     private val rpm = Extra(ID_RPM, "Обороты", "об/мин", pid = 0x0C) { c -> readRpm(c) }
-    private val load = Extra(ID_LOAD, "Нагрузка двигателя", "%", pid = 0x04) { c -> readLoad(c) }
     private val fuel = Extra(ID_FUEL, "Расход топлива", "", pid = 0x10) { c -> readFuel(c) }
-    private val all = listOf(voltage, rpm, load, fuel)
+    private val all = listOf(voltage, rpm, fuel)
 
     /** Sensors to poll now (supported and not hidden), in card order. */
     fun sensors(): List<SensorDefinition> {
@@ -167,12 +165,6 @@ class EngineExtras {
         return reading(rpm, r?.toDouble(), r?.let { "$it об/мин" }, raw, note = "SAE 010C")
     }
 
-    private suspend fun readLoad(c: Elm327Client): SensorReading {
-        val raw = c.send("0104", timeoutMs = 1500)
-        val l = bytes(raw, 0x04, 1)?.let { EngineMath.loadPercent(it[0]) }
-        return reading(load, l, l?.let { String.format(Locale.US, "%.0f %%", it) }, raw, note = "SAE 0104 (расчётная нагрузка)")
-    }
-
     private suspend fun readFuel(c: Elm327Client): SensorReading {
         val raw = c.send("0110", timeoutMs = 1500)
         val maf = bytes(raw, 0x10, 2)?.let { EngineMath.mafGs(it[0], it[1]) }
@@ -200,9 +192,8 @@ class EngineExtras {
     companion object {
         const val ID_VOLTAGE = "voltage"
         const val ID_RPM = "rpm"
-        const val ID_LOAD = "engine_load"
         const val ID_FUEL = "fuel_rate"
         const val MAX_NO_DATA = 3
-        val IDS = listOf(ID_VOLTAGE, ID_RPM, ID_LOAD, ID_FUEL)
+        val IDS = listOf(ID_VOLTAGE, ID_RPM, ID_FUEL)
     }
 }

@@ -72,6 +72,8 @@ data class ObdUiState(
     val dtcBusy: Boolean = false,
     /** True after at least one successful Mode 03/07 read this session. */
     val dtcScanned: Boolean = false,
+    /** Last «Сбросить ошибки» run (per module: стёрто / вернулся); cleared by the next scan. */
+    val dtcClear: com.chuikoff.obd.diag.ClearReport? = null,
     // CVT diagnostics
     val cvtFormula: CvtFormula = CvtFormula.OUT3_POLY,
     val cvtDebugExtra: Boolean = false,
@@ -595,7 +597,7 @@ class ObdController private constructor(private val app: Application) {
         if (busExclusive()) return
         val log = mutableListOf<com.chuikoff.obd.diag.DtcLogLine>()
         _ui.update {
-            it.copy(dtcBusy = true, dtcError = null, dtcLog = emptyList(),
+            it.copy(dtcBusy = true, dtcError = null, dtcLog = emptyList(), dtcClear = null,
                 dtcStatus = if (full) "Полная проверка: опрос всех блоков (~1 мин)…" else "Чтение ошибок OBD…")
         }
         scope.launch {
@@ -635,6 +637,11 @@ class ObdController private constructor(private val app: Application) {
                 r.allCodes.forEach { c ->
                     append("${c.code}${com.chuikoff.obd.diag.DtcText.ru(c.code)?.let { " ($it)" } ?: ""} — ${c.ecuName} — ${c.kind.titleRu}${c.statusRu?.let { " — $it" } ?: ""}\n")
                 }
+                append("Прочитано: ${timeText(r.timestampMs)}\n")
+                s.dtcClear?.let { c ->
+                    append("Сброс ${timeText(c.timestampMs)}: ${c.obdReplyRu}\n")
+                    c.modules.forEach { o -> append("  ${o.module.name} (${o.module.tx}): ${o.textRu()}\n") }
+                }
                 val inactive = r.inactiveCodes
                 if (inactive.isNotEmpty()) {
                     append("Неактивные / история (${inactive.size}):\n")
@@ -672,36 +679,50 @@ class ObdController private constructor(private val app: Application) {
             return
         }
         if (busExclusive()) return
-        _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Сброс DTC (Mode 04)…") }
-        val log = mutableListOf<com.chuikoff.obd.diag.DtcLogLine>()
+        _ui.update { it.copy(dtcBusy = true, dtcError = null, dtcStatus = "Сброс ошибок…") }
+        val log = _ui.value.dtcLog.toMutableList()
         scope.launch {
             try {
                 poller.paused(client) {
-                    val raw = client.clearDtcs()
+                    // 1) OBD Mode 04 (engine / TCM emissions codes)
+                    val raw = runCatching { client.clearDtcs() }.getOrDefault("")
                     log += com.chuikoff.obd.diag.DtcLogLine(System.currentTimeMillis(), null, "04", Elm327Parser.visibleRaw(raw))
-                    val cleaned = Elm327Parser.clean(raw)
                     val hex = Elm327Parser.hexDigits(raw)
-                    if (hex.contains("7F") && !hex.contains("44")) {
-                        runCatching { client.restoreEngineEcuFilter() }
-                        _ui.update {
-                            it.copy(dtcStatus = "Сброс отклонён ЭБУ (условия). Ответ: $cleaned", dtcError = null,
-                                dtcLog = log.toList())
+                    val obdText = when {
+                        hex.contains("44") -> "OBD (Mode 04): принято"
+                        hex.contains("7F") -> "OBD (Mode 04): отклонено (${Elm327Parser.clean(raw)})"
+                        else -> "OBD (Mode 04): ответ ${Elm327Parser.clean(raw).ifEmpty { "—" }}"
+                    }
+                    // 2) every module that listed codes in the last full check: UDS 14 / KWP 14 + re-read
+                    val scanner = com.chuikoff.obd.diag.DtcScanner(client) { log += it }
+                    val known = _ui.value.dtcReport?.modules ?: run {
+                        _ui.update { it.copy(dtcStatus = "Сброс: сначала ищу блоки с кодами (полная проверка)…") }
+                        runCatching { scanner.full { p -> _ui.update { it.copy(dtcStatus = "Сброс, поиск кодов: $p…") } } }
+                            .getOrNull()?.also { r -> _ui.update { it.copy(dtcReport = r) } }?.modules
+                    }
+                    val targets = known?.filter { it.codes.isNotEmpty() }.orEmpty()
+                    val outcomes = scanner.clear(targets) { p -> _ui.update { it.copy(dtcStatus = "Сброс: $p…") } }
+                    // 3) fresh OBD read
+                    val q = runCatching { scanner.quick() }.getOrNull()
+                    val now = System.currentTimeMillis()
+                    val clear = com.chuikoff.obd.diag.ClearReport(now, obdText, outcomes)
+                    _ui.update { st ->
+                        val old = st.dtcReport
+                        val mods = old?.modules?.map { m -> outcomes.firstOrNull { it.module.tx == m.module.tx }?.after ?: m }
+                        val report = when {
+                            q != null && old != null -> q.copy(modules = mods, tpms = old.tpms)
+                            q != null -> q
+                            else -> old?.copy(timestampMs = now, modules = mods)
                         }
-                    } else {
-                        val report = runCatching {
-                            com.chuikoff.obd.diag.DtcScanner(client) { log += it }.quick()
-                        }.getOrNull()
-                        val status = if (hex.contains("44")) "DTC сброшены. Ответ: $cleaned"
-                        else "Ответ сброса неоднозначен: $cleaned (коды перечитаны)"
-                        _ui.update {
-                            it.copy(
-                                dtcReport = report ?: it.dtcReport,
-                                dtcScanned = report != null || it.dtcScanned,
-                                dtcStatus = status + (report?.let { r -> "\n" + r.summaryRu() } ?: ""),
-                                dtcError = null,
-                                dtcLog = log.toList()
-                            )
-                        }
+                        st.copy(
+                            dtcReport = report,
+                            dtcScanned = report != null || st.dtcScanned,
+                            dtcClear = clear,
+                            dtcStatus = "Сброс выполнен, коды перечитаны " + timeText(now) +
+                                (report?.let { r -> "\n" + r.summaryRu() } ?: ""),
+                            dtcError = null,
+                            dtcLog = log.toList()
+                        )
                     }
                 }
             } catch (e: CancellationException) {
@@ -713,6 +734,9 @@ class ObdController private constructor(private val app: Application) {
             }
         }
     }
+
+    private fun timeText(ms: Long): String =
+        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(ms))
 
     /**
      * «Сохранить диагностику»: if connected, pause polling and actively read adapter info, responding

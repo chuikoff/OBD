@@ -216,6 +216,7 @@ class DtcScanner(
                 for (req in extra) {
                     val x = uds(req)
                     if (x is DtcDecode.Reply.Codes) acc = merge(acc, x, req, notes)
+                    if (acc.codes.isNotEmpty()) break // Creta 7A0: 19 02 09 (its own mask) works
                 }
                 if (acc.codes.isEmpty()) {
                     safeTx("1003", tag)
@@ -250,6 +251,55 @@ class DtcScanner(
                 (notes + "KWP: непонятный ответ").joinToString("; "))
             DtcDecode.Reply.None -> ModuleResult(m, answered, null, emptyList(), 0, notes.joinToString("; ").ifEmpty { null })
         }
+    }
+
+    /**
+     * Clear codes in every module that listed any: UDS 14 FF FF FF (→ 54; NRC 22/7F → 10 03 and again),
+     * KWP 14 FF 00 / 14 FF FF; then the module is read again so the UI can say «стёрто» or «вернулся».
+     * Engine/TCM also get OBD Mode 04 by the caller.
+     */
+    suspend fun clear(targets: List<ModuleResult>, onProgress: (String) -> Unit = {}): List<ClearOutcome> = client.probing {
+        val out = mutableListOf<ClearOutcome>()
+        try {
+            for (t in targets) {
+                val m = t.module
+                val tag = "${m.name} ${m.tx}"
+                onProgress("сброс ${m.name}")
+                Elm327Client.ecuAddressing(m.tx, m.rx).forEach { at(it, tag) }
+                val kwpFirst = t.protocol == "KWP"
+                val tries = if (kwpFirst) listOf("14FF00", "14FFFF", "14FFFFFF") else listOf("14FFFFFF", "14FF00")
+                var ok = false
+                var why: String? = null
+                suspend fun attempt(req: String): Boolean {
+                    val raw = try { tx(req, tag, timeoutMs = 6000) } catch (e: CancellationException) { throw e } catch (_: Exception) { "" }
+                    val msgs = Elm327Parser.assemble(raw).filter { it.bytes.isNotEmpty() }
+                    fun b(m: Elm327Parser.ObdMessage, i: Int) = if (i < m.bytes.size) Elm327Parser.toUnsigned(m.bytes[i]) else -1
+                    if (msgs.any { b(it, 0) == 0x54 }) return true
+                    val nrc = msgs.firstOrNull { b(it, 0) == 0x7F && b(it, 1) == 0x14 && b(it, 2) != 0x78 }?.let { b(it, 2) }
+                    if (nrc == null && msgs.any { b(it, 0) == 0x7F && b(it, 1) == 0x14 }) { delay(1500); return true } // only «78 pending»
+                    why = when {
+                        nrc != null -> DtcDecode.nrcRu(nrc)
+                        msgs.isEmpty() -> "нет ответа"
+                        else -> "ответ ${Elm327Parser.clean(raw)}"
+                    }
+                    return false
+                }
+                for (req in tries) { if (attempt(req)) { ok = true; break } }
+                if (!ok) {
+                    safeTx("1003", tag)
+                    ok = attempt(tries.first())
+                    safeTx("1001", tag)
+                }
+                delay(300)
+                val after = scanModule(m)
+                log(DtcLogLine(System.currentTimeMillis(), tag, "== СБРОС",
+                    (if (ok) "принят" else "не принят: $why") + ", после: кодов ${after.codes.size}"))
+                out += ClearOutcome(m, ok, if (ok) null else why, t.codes, after)
+            }
+        } finally {
+            restore()
+        }
+        out
     }
 
     /** A failed request in one module must not abort the whole scan. */

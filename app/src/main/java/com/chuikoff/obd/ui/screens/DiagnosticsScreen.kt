@@ -85,7 +85,14 @@ fun DiagnosticsScreen(
             item { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         }
 
+        state.dtcClear?.let { c -> item { ClearCard(c) } }
         if (report != null) {
+            item {
+                Text("Прочитано: " + java.text.SimpleDateFormat("dd.MM HH:mm:ss", java.util.Locale.US).format(java.util.Date(report.timestampMs)) +
+                    (if (report.modules != null) " · полная проверка" else " · быстрая проверка") +
+                    (if (state.dtcClear != null) " · после сброса" else ""),
+                    style = MaterialTheme.typography.bodySmall)
+            }
             item { MilCard(report) }
             val byEcu = report.allCodes.groupBy { it.ecuName }
             if (byEcu.isEmpty()) {
@@ -123,7 +130,7 @@ fun DiagnosticsScreen(
                 enabled = connected && !state.dtcBusy,
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-            ) { Text("Сбросить ошибки (Mode 04)") }
+            ) { Text("Сбросить ошибки (все блоки)") }
         }
         if (state.dtcLog.isNotEmpty()) item { RawLogCard(state, exportText) }
     }
@@ -134,9 +141,10 @@ fun DiagnosticsScreen(
             title = { Text("Сбросить ошибки?") },
             text = {
                 Text(
-                    "Mode 04 очистит сохранённые коды ошибок двигателя/коробки. " +
-                        "Индикатор Check Engine может погаснуть, мониторы готовности (readiness) сбросятся. " +
-                        "Ошибки ABS, подушек и других блоков этим не стираются."
+                    "Будут стёрты коды двигателя/коробки (OBD Mode 04) и коды во всех блоках, где они нашлись при " +
+                        "полной проверке (кузов/TPMS, ABS, подушки…). Если полной проверки ещё не было, она пройдёт сначала. " +
+                        "Мониторы готовности (readiness) сбросятся. После сброса каждый блок перечитывается: " +
+                        "«стёрто» или «код вернулся» (неисправность активна). Глушить двигатель не обязательно, зажигание должно быть включено."
                 )
             },
             confirmButton = {
@@ -179,6 +187,32 @@ private fun MilCard(r: DtcReport) {
                 Text("Ни один ЭБУ не ответил на OBD-запросы (зажигание включено?).",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
+        }
+    }
+}
+
+@Composable
+private fun ClearCard(c: com.chuikoff.obd.diag.ClearReport) {
+    val anyBack = c.modules.any { it.returned.isNotEmpty() }
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (anyBack) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Сброс ошибок · " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(c.timestampMs)),
+                style = MaterialTheme.typography.titleMedium)
+            Text(c.obdReplyRu, style = MaterialTheme.typography.bodySmall)
+            if (c.modules.isEmpty()) Text("В блоках кодов не было — стирать нечего.", style = MaterialTheme.typography.bodyMedium)
+            c.modules.forEach { o ->
+                Text("${o.module.name}: ${o.textRu()}", style = MaterialTheme.typography.bodyMedium)
+            }
+            Text(
+                if (anyBack) "Вернувшиеся коды — неисправность есть прямо сейчас, сбросом её не убрать."
+                else "Если причина не устранена, код и лампа вернутся после поездки (TPMS — после ~10–20 мин езды).",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }

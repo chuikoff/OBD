@@ -200,6 +200,34 @@ class CretaTpmsDtcTest {
         org.junit.Assert.assertTrue(log.any { it.request == "== ОТВЕТИЛИ" && it.rawVisible.contains("7A0→7A8") })
     }
 
+    @org.junit.Test fun clearSends14AndReportsReturnedCode() = kotlinx.coroutines.runBlocking {
+        var header = "7E0"
+        var cleared = false
+        val sent = mutableListOf<String>()
+        val t = ScriptedElm { c ->
+            if (header == "7A0") sent += c
+            when {
+                c == "ATZ" -> "\r\rELM327 v1.5\r\r>"
+                c.startsWith("ATSH") -> { header = c.removePrefix("ATSH"); "OK\r\r>" }
+                c.startsWith("AT") -> "OK\r\r>"
+                header == "7A0" && c == "14FFFFFF" -> { cleared = true; "54\r\r>" }
+                header == "7A0" && c == "1902FF" -> "590209\r\r>"
+                header == "7A0" && c == "190209" -> if (cleared) "590209531300 89\r\r>".replace(" ", "")
+                    else "00F\r0:59020953130089\r1:56620009566300\r2:09AAAAAAAAAAAA\r\r>"
+                else -> "NO DATA\r\r>"
+            }
+        }
+        val c = com.chuikoff.obd.elm327.Elm327Client(t); c.ensureInitialized()
+        val m = com.chuikoff.obd.diag.DiagModule("Кузов (BCM) / TPMS", "7A0", "7A8")
+        val before = com.chuikoff.obd.diag.ModuleResult(m, true, "UDS 19 02",
+            listOf(com.chuikoff.obd.diag.DtcEntry("C1313", "7A8", "x", com.chuikoff.obd.diag.DtcKind.UDS, 0x89)))
+        val out = com.chuikoff.obd.diag.DtcScanner(c) {}.clear(listOf(before)).single()
+        org.junit.Assert.assertTrue(out.accepted)
+        org.junit.Assert.assertTrue("14FFFFFF" in sent)
+        org.junit.Assert.assertEquals(listOf("C1313"), out.returned.map { it.code })
+        org.junit.Assert.assertTrue(out.textRu().startsWith("код вернулся"))
+    }
+
     @org.junit.Test fun discoverParse() {
         org.junit.Assert.assertEquals(listOf("7A8"), com.chuikoff.obd.diag.DiscoverParse.responders("7A8 02 7E 00 AA AA AA AA AA\r\r>", "7A0"))
         org.junit.Assert.assertEquals(emptyList<String>(), com.chuikoff.obd.diag.DiscoverParse.responders("NO DATA\r\r>", "7A0"))

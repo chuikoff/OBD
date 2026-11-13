@@ -100,3 +100,23 @@ data class DtcLogLine(val timestampMs: Long, val module: String?, val request: S
         return "[$t] ${module?.let { "$it: " } ?: ""}$request → $rawVisible"
     }
 }
+
+/** Result of «Сбросить ошибки» for one module. */
+data class ClearOutcome(
+    val module: DiagModule,
+    val accepted: Boolean,
+    val reasonRu: String?,
+    val before: List<DtcEntry>,
+    val after: ModuleResult
+) {
+    val returned: List<DtcEntry> get() = after.codes
+    fun textRu(): String = when {
+        !accepted && returned.isNotEmpty() -> "блок отказал в сбросе (${reasonRu ?: "?"}); коды на месте: ${returned.joinToString { it.code }}"
+        returned.isEmpty() -> "стёрто" + (if (!accepted) " (ответ на сброс: ${reasonRu ?: "?"})" else "") +
+            if (before.any { (it.status ?: 0) and 0x01 != 0 }) ". Если неисправность не устранена, код вернётся после поездки" else ""
+        else -> "код вернулся сразу — неисправность активна: ${returned.joinToString { it.code }}"
+    }
+}
+
+/** Whole clear run, shown on the Errors tab until the next scan. */
+data class ClearReport(val timestampMs: Long, val obdReplyRu: String, val modules: List<ClearOutcome>)

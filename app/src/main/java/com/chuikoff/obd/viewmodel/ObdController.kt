@@ -488,6 +488,7 @@ class ObdController private constructor(private val app: Application) {
                 autoSelectProfileByVin(elm!!)
                 // only used without MAF (MAP estimate): Creta 1.6 MPI = 1.591 л
                 engineExtras.displacementL = if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) 2.0 else 1.591
+                engineExtras.clusterTank = _ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID
                 val last = LastAdapter(device.address, device.name, usedType)
                 saveLastAdapter(last)
                 alertEngine.resetTrip()
@@ -757,14 +758,16 @@ class ObdController private constructor(private val app: Application) {
                 val client = elm
                 var adapter: List<com.chuikoff.obd.diag.DiagSweep.Line> = emptyList()
                 var gearbox: List<com.chuikoff.obd.diag.DiagSweep.Line> = emptyList()
+                var fuel: List<com.chuikoff.obd.diag.DiagSweep.Line> = emptyList()
                 if (client != null && _ui.value.connectionState is ConnectionState.Connected) {
                     poller.paused(client) {
                         val sweep = com.chuikoff.obd.diag.DiagSweep(client) { p -> _ui.update { it.copy(diagStatus = "Сбор диагностики: $p…") } }
                         adapter = sweep.adapterInfo()
+                        fuel = sweep.fuelProbe(_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID)
                         if (_ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID) gearbox = sweep.bodyClimate() + sweep.gearbox()
                     }
                 }
-                val text = diagnosticsText(adapter, gearbox)
+                val text = diagnosticsText(adapter, gearbox, fuel)
                 val name = com.chuikoff.obd.diag.DiagFile.fileName()
                 val saved = withContext(Dispatchers.IO) { com.chuikoff.obd.diag.DiagFile.save(app, name, text) }
                 _ui.update { it.copy(diagSaved = saved, diagStatus = "Сохранено: ${saved.shownPath}") }
@@ -785,7 +788,8 @@ class ObdController private constructor(private val app: Application) {
 
     private fun diagnosticsText(
         adapter: List<com.chuikoff.obd.diag.DiagSweep.Line>,
-        gearbox: List<com.chuikoff.obd.diag.DiagSweep.Line>
+        gearbox: List<com.chuikoff.obd.diag.DiagSweep.Line>,
+        fuel: List<com.chuikoff.obd.diag.DiagSweep.Line> = emptyList()
     ): String = buildString {
         val s = _ui.value
         fun section(t: String) { append("\n\n===== ").append(t).append(" =====\n") }
@@ -798,6 +802,10 @@ class ObdController private constructor(private val app: Application) {
         append("Поддерживаемые PID (двигатель): ${engineExtras.supported?.sorted()?.joinToString(" ") { "%02X".format(it) } ?: "не прочитаны"}\n")
         com.chuikoff.obd.sensors.CretaAtf.selected?.let { append("АКПП источник: ${it.label} — ${it.sourceRu}\n") }
             ?: append("АКПП источник: не найден (probed=${com.chuikoff.obd.sensors.CretaAtf.probed})\n")
+        if (fuel.isNotEmpty()) {
+            section("РАСХОД: ПОИСК (кратко)")
+            fuel.mapNotNull { com.chuikoff.obd.diag.DiagSweep.brief(it) }.forEach { append(it).append('\n') }
+        }
 
         section("ПОКАЗАНИЯ")
         s.readings.forEach { r ->
@@ -816,6 +824,7 @@ class ObdController private constructor(private val app: Application) {
         }
         section("ОШИБКИ: СВОДКА")
         append(if (s.dtcReport == null) "проверку ещё не запускали\n" else dtcExportText(includeRaw = false))
+        if (fuel.isNotEmpty()) { section("РАСХОД: ПОИСК (полностью)"); fuel.forEach { append(it.toText()).append('\n') } }
         if (gearbox.isNotEmpty()) { section("КЛИМАТ / ШИНЫ / КОРОБКА: ВЕСЬ ОПРОС"); gearbox.forEach { append(it.toText()).append('\n') } }
         if (s.dtcLog.isNotEmpty()) {
             section("ОШИБКИ: RAW (${s.dtcLog.size})")

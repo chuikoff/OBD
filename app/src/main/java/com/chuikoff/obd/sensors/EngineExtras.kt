@@ -125,11 +125,19 @@ class EngineExtras {
 
     val trip = FuelTrip()
 
+    /** Creta: tank level from the cluster (7C6 22 B002, byte 4 /2 = liters; OBDb Kona/Seltos/Elantra,
+     *  Creta 13.11.2026: 0x43 → 33.5 л next to odometer 83 991 km in the same reply). Read every 30 s. */
+    @Volatile var clusterTank = false
+    @Volatile var tankLiters: Double? = null
+        private set
+    private var tankMs = 0L
+
     fun reset(supported: Set<Int>?) {
         this.supported = supported
         hidden.clear(); noData.clear()
         lastRpm = null; lastKmh = null
         trip.reset()
+        tankLiters = null; tankMs = 0L
     }
 
     private fun hasMaf(s: Set<Int>?) = s?.contains(0x10) == true
@@ -255,20 +263,51 @@ class EngineExtras {
         val per100 = EngineMath.litersPer100km(lph, kmh)
         val instant = if (per100 != null) String.format(Locale.US, "%.1f л/100км", per100)
         else String.format(Locale.US, "%.1f л/ч", lph)
+        if (clusterTank && System.currentTimeMillis() - tankMs > TANK_EVERY_MS) readTank(c)
+        val tank = tankLiters?.let { String.format(Locale.US, " · в баке %.1f л", it) } ?: ""
         val avg = trip.averagePer100
         val text = avg?.let { String.format(Locale.US, "%.1f л/100км", it) } ?: "копится…"
         val status = if (avg != null)
-            String.format(Locale.US, "сейчас %s · %.1f км · %.2f л", instant, trip.km, trip.liters)
-        else String.format(Locale.US, "средний после 1 км: пройдено %.1f км · сейчас %s", trip.km, instant)
+            String.format(Locale.US, "сейчас %s · %.1f км · %.2f л", instant, trip.km, trip.liters) + tank
+        else String.format(Locale.US, "средний после 1 км: пройдено %.1f км · сейчас %s", trip.km, instant) + tank
         return reading(
             fuel, avg ?: (per100 ?: lph), text, rawAll,
-            note = "Средний за поездку (с подключения): литры ÷ км. Литры по $src: бензин, AFR 14.7, 0.745 кг/л — ориентировочно",
+            note = "Средний за поездку (с подключения): литры ÷ км. Литры по $src: бензин, AFR 14.7, 0.745 кг/л — ориентировочно" +
+                (if (clusterTank) ". В баке — приборка 7C6 22 B002" else ""),
             detail = String.format(Locale.US, "Поездка: %.2f км, %.3f л · воздух %.2f г/с · %.2f л/ч · скорость %s",
                 trip.km, trip.liters, maf, lph, kmh?.let { "$it км/ч" } ?: "—")
         ).copy(statusLine = status)
     }
 
+    private suspend fun readTank(c: Elm327Client) {
+        tankMs = System.currentTimeMillis()
+        try {
+            c.probing {
+                Elm327Client.ecuAddressing("7C6", "7CE").forEach { runCatching { c.send(it, timeoutMs = 1500) } }
+                tankLiters = parseClusterTank(c.send("22B002", timeoutMs = 2500)) ?: tankLiters
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        } finally {
+            runCatching { c.restoreEngineEcuFilter() }
+        }
+    }
+
     companion object {
+        const val TANK_EVERY_MS = 30_000L
+
+        /** 62 B0 02 | b0 b1 b2 b3 FUEL(/2 л) … ; FF = no value. */
+        fun parseClusterTank(raw: String): Double? {
+            val m = Elm327Parser.assemble(raw).firstOrNull {
+                it.bytes.size > 7 && Elm327Parser.toUnsigned(it.bytes[0]) == 0x62 &&
+                    Elm327Parser.toUnsigned(it.bytes[1]) == 0xB0 && Elm327Parser.toUnsigned(it.bytes[2]) == 0x02
+            } ?: return null
+            if (!m.positionsTrustworthy) return null
+            val x = Elm327Parser.toUnsigned(m.bytes[7])
+            return if (x == 0xFF) null else x / 2.0
+        }
+
         const val ID_VOLTAGE = "voltage"
         const val ID_RPM = "rpm"
         const val ID_FUEL = "fuel_rate"

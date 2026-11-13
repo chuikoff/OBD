@@ -110,6 +110,55 @@ class DiagSweep(private val client: Elm327Client, private val onProgress: (Strin
         out.toList()
     }
 
+    /**
+     * «Расход: поиск»: candidate sources of fuel consumption / injected fuel / tank level, every reply
+     * (including NRC / NO DATA) kept. Hyundai: cluster 7C6 22 B0xx (B002 = tank level, OBDb), engine
+     * 7E0 KWP 21 01…, UDS 22 E0xx (OBDb Elantra/Kona). Mitsubishi: engine 7E0 21 05 (injector drive
+     * time, OBDb), 21 xx; cluster/ETACS 6A0→514 21 A0…AF (A3 = fuel level, AD = odometer, OBDb).
+     */
+    suspend fun fuelProbe(outlander: Boolean): List<Line> = client.probing {
+        out.clear()
+        try {
+            onProgress("расход: стандартные PID")
+            for (c in listOf("ATH1", "ATCAF1", "ATFCSM0", "ATSH7DF", "ATAR")) tx("OBD", c, 1500)
+            for (c in listOf("015E", "019D", "019E", "012F", "0110", "0151")) tx("РАСХОД 7DF", c, 3000)
+            runCatching { client.send("ATH0", timeoutMs = 1500) }
+            val plan: List<Triple<String, String, List<String>>> = if (outlander) listOf(
+                Triple("7E0", "7E8", (0x01..0x10).map { "21%02X".format(it) } + listOf("214A", "2151", "21C2", "221207", "221114")),
+                Triple("6A0", "514", (0xA0..0xAF).map { "21%02X".format(it) }),
+                Triple("688", "511", listOf("2101", "2102", "2111"))
+            ) else listOf(
+                Triple("7C6", "7CE", (0x01..0x0F).map { "22B0%02X".format(it) } + listOf("22B100", "22B101", "22B102", "2101", "2102", "2103")),
+                Triple("7E0", "7E8", listOf("2101", "2102", "2103", "2104", "2105", "2106", "2110", "2111", "22E001", "22E002", "22E007", "22E023"))
+            )
+            for ((t, r, cmds) in plan) {
+                onProgress("расход: $t")
+                Elm327Client.ecuAddressing(t, r).forEach { tx("РАСХОД@$t", it, 1500) }
+                cmds.forEach { tx("РАСХОД@$t", it, 2500) }
+            }
+        } finally {
+            restore()
+        }
+        out.toList()
+    }
+
+    companion object {
+        /** One short line per data request for the top of the file: «7C6 22B002 → 15 б: 62 B0 02 …» / NRC / нет ответа. */
+        fun brief(l: Line): String? {
+            if (l.cmd.startsWith("AT")) return null
+            val msgs = Elm327Parser.assemble(l.raw).filter { it.bytes.isNotEmpty() }
+            val res = when {
+                msgs.isEmpty() -> if (Elm327Parser.visibleRaw(l.raw).contains("NO DATA")) "нет ответа" else Elm327Parser.visibleRaw(l.raw).take(30).ifEmpty { "пусто" }
+                else -> msgs.joinToString(" | ") { m ->
+                    val b = m.bytes.map { Elm327Parser.toUnsigned(it) }
+                    if (b.size >= 3 && b[0] == 0x7F) "NRC %02X".format(b[2])
+                    else "${b.size} б: " + b.take(24).joinToString(" ") { "%02X".format(it) } + if (b.size > 24) " …" else ""
+                }
+            }
+            return "${l.label.removePrefix("РАСХОД").trim().removePrefix("@")} ${l.cmd} → $res"
+        }
+    }
+
     private suspend fun restore() = withContext(NonCancellable) {
         runCatching { client.send("ATH0", timeoutMs = 1500) }
         runCatching { client.restoreEngineEcuFilter() }

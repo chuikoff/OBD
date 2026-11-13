@@ -187,4 +187,19 @@ class EngineExtrasTest {
         assertTrue(f.note!!.contains("MAP"))
         assertTrue(f.statusLine!!.contains("л/ч"))
     }
+
+    @Test fun cretaClusterTankFromRealReply() {
+        // Creta 13.11.2026: 62 B0 02 E0 00 00 00 43 B6 01 48 17 00 00 00 → 0x43/2 = 33.5 л
+        val raw = "00F\r0:62B002E00000\r1:0043B601481700\r2:00000000000000\r\r>"
+        assertEquals(33.5, EngineExtras.parseClusterTank(raw)!!, 1e-9)
+        assertNull(EngineExtras.parseClusterTank("7F2231\r\r>"))
+    }
+
+    @Test fun fuelProbeBriefLines() {
+        val nrc = com.chuikoff.obd.diag.DiagSweep.Line("РАСХОД@7E0", "22E023", "7F2211\r\r>")
+        assertEquals("7E0 22E023 → NRC 11", com.chuikoff.obd.diag.DiagSweep.brief(nrc))
+        val none = com.chuikoff.obd.diag.DiagSweep.Line("РАСХОД 7DF", "015E", "NO DATA\r\r>")
+        assertEquals("7DF 015E → нет ответа", com.chuikoff.obd.diag.DiagSweep.brief(none))
+        assertNull(com.chuikoff.obd.diag.DiagSweep.brief(com.chuikoff.obd.diag.DiagSweep.Line("РАСХОД@7E0", "ATSH7E0", "OK\r\r>")))
+    }
 }

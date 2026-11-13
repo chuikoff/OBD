@@ -210,6 +210,8 @@ class ObdController private constructor(private val app: Application) {
         _ui.update {
             it.copy(
                 cvtFormula = formula, cvtDebugExtra = extra, passport = cachedPassport,
+                selectedProfile = settingsPrefs.getString(K_PROFILE, null)?.let { id -> VehicleProfileRegistry.byId(id) }
+                    ?: it.selectedProfile,
                 alertSettings = loadAlertSettings(),
                 autoConnect = settingsPrefs.getBoolean(K_AUTO, true),
                 autoConnectOnBluetooth = settingsPrefs.getBoolean(K_AUTO_BT, true),
@@ -331,6 +333,7 @@ class ObdController private constructor(private val app: Application) {
         _ui.value.passport?.let { Passport.toText(it, com.chuikoff.obd.BuildConfig.VERSION_NAME) } ?: ""
 
     fun selectProfile(profile: VehicleProfile) {
+        settingsPrefs.edit().putString(K_PROFILE, profile.id).apply()
         _ui.update { it.copy(selectedProfile = profile) }
         CretaAtf.reset()
         if (_ui.value.connectionState is ConnectionState.Connected) {
@@ -476,6 +479,7 @@ class ObdController private constructor(private val app: Application) {
                 elm = Elm327Client(transport).also { watchLink(it) }
                 elm!!.ensureInitialized()
                 engineExtras.reset(readSupportedPids(elm!!))
+                autoSelectProfileByVin(elm!!)
                 val last = LastAdapter(device.address, device.name, usedType)
                 saveLastAdapter(last)
                 alertEngine.resetTrip()
@@ -616,7 +620,9 @@ class ObdController private constructor(private val app: Application) {
         }
     }
 
-    fun dtcExportText(): String {
+    fun dtcExportText(): String = dtcExportText(includeRaw = true)
+
+    private fun dtcExportText(includeRaw: Boolean): String {
         val s = _ui.value
         return buildString {
             append("OBD ${com.chuikoff.obd.BuildConfig.VERSION_NAME} — ошибки (DTC)\n")
@@ -635,8 +641,10 @@ class ObdController private constructor(private val app: Application) {
                     append("\n")
                 }
             }
-            append("\nRAW (${s.dtcLog.size}):\n")
-            s.dtcLog.forEach { append(it.toText()).append("\n") }
+            if (includeRaw) {
+                append("\nRAW (${s.dtcLog.size}):\n")
+                s.dtcLog.forEach { append(it.toText()).append("\n") }
+            }
         }
     }
 
@@ -758,9 +766,19 @@ class ObdController private constructor(private val app: Application) {
             append('\n')
         }
         if (adapter.isNotEmpty()) { section("АДАПТЕР И ОТВЕЧАЮЩИЕ ЭБУ (прочитано сейчас)"); adapter.forEach { append(it.toText()).append('\n') } }
-        if (gearbox.isNotEmpty()) { section("КОРОБКА: ШИРОКИЙ ОПРОС 7E1/7E0 (прочитано сейчас)"); gearbox.forEach { append(it.toText()).append('\n') } }
-        section("ОШИБКИ (последняя проверка)")
-        append(if (s.dtcReport == null && s.dtcLog.isEmpty()) "проверку ещё не запускали\n" else dtcExportText())
+        if (gearbox.isNotEmpty()) {
+            // answers with data first (short), full list later — the top of the file must be enough
+            section("КОРОБКА: ОТВЕТЫ С ДАННЫМИ (7E1/7E0)")
+            gearbox.filter { l -> Elm327Parser.assemble(l.raw).any { it.bytes.isNotEmpty() && Elm327Parser.toUnsigned(it.bytes[0]) != 0x7F } }
+                .forEach { append(it.toText()).append('\n') }
+        }
+        section("ОШИБКИ: СВОДКА")
+        append(if (s.dtcReport == null) "проверку ещё не запускали\n" else dtcExportText(includeRaw = false))
+        if (gearbox.isNotEmpty()) { section("КОРОБКА: ВЕСЬ ОПРОС"); gearbox.forEach { append(it.toText()).append('\n') } }
+        if (s.dtcLog.isNotEmpty()) {
+            section("ОШИБКИ: RAW (${s.dtcLog.size})")
+            s.dtcLog.forEach { append(it.toText()).append('\n') }
+        }
         section("ЛОГ КОРОБКИ / CVT")
         append(cvtLogExportText())
         section("ПАСПОРТ")
@@ -998,6 +1016,28 @@ class ObdController private constructor(private val app: Application) {
     }
 
     /** 0100/0120/0140 right after init (functional 7DF); fallback: PID list of the saved passport. */
+    /**
+     * The Creta was scanned with the Outlander profile (13.11 diag files): read the VIN once per
+     * connection (functional 0902) and switch to the matching profile. Unknown make → keep the choice.
+     */
+    private suspend fun autoSelectProfileByVin(client: Elm327Client) {
+        val raw = try {
+            client.probing { client.send("0902", timeoutMs = 4000) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return
+        }
+        val vin = Passport.parseVin(raw) ?: _ui.value.passport?.vin
+        val match = VehicleProfileRegistry.forVin(vin) ?: return
+        com.chuikoff.obd.diag.DiagLog.event("VIN $vin → профиль ${match.displayNameRu}")
+        if (match.id != _ui.value.selectedProfile.id) {
+            settingsPrefs.edit().putString(K_PROFILE, match.id).apply()
+            CretaAtf.reset()
+            _ui.update { it.copy(selectedProfile = match, statusMessage = "Профиль выбран по VIN: ${match.displayNameRu}") }
+        }
+    }
+
     private suspend fun readSupportedPids(client: Elm327Client): Set<Int>? {
         val replies = mutableListOf<String>()
         for ((i, base) in listOf(0x00, 0x20, 0x40).withIndex()) {
@@ -1218,6 +1258,7 @@ class ObdController private constructor(private val app: Application) {
             "Нет разрешения «Устройства поблизости» (Bluetooth). Разреши его: Настройки → Приложения → OBD → Разрешения."
         private const val K_CVT_FORMULA = "formula"
         private const val K_CVT_DEBUG_EXTRA = "debug_extra"
+        private const val K_PROFILE = "profile_id"
         private const val K_AMB_VALUE = "shown_c"
         private const val K_AMB_AT = "shown_at_ms"
         private const val AMBIENT_MAX_HELD = 10

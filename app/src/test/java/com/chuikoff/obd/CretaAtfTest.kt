@@ -104,6 +104,22 @@ class CretaAtfTest {
         assertEquals("ATSH7E0", t.sent.last { it.startsWith("ATSH") }) // engine addressing restored
     }
 
+    @Test fun cretaUdsOnlyTcmUses2201A0Byte13() = runBlocking {
+        // Creta 2018 (diag file 13.11): service 21 is not supported by the TCM → 7F 21 11
+        val msg = listOf(0x62, 0x01, 0xA0) + MutableList(30) { 0x11 }.also { it[13] = 0x5C } // 92 → 52 °C
+        val (c, _) = elm { h, cmd ->
+            when {
+                h == "7E1" && cmd.startsWith("21") -> "7F2111\r\r>"
+                h == "7E1" && cmd == "2201A0" -> "7F2278\r" + isoTp(msg) // response pending, then data
+                else -> "NO DATA\r\r>"
+            }
+        }
+        c.ensureInitialized()
+        val r = CretaAtfSensor().read(c)
+        assertEquals(52.0, r.value!!, 0.0)
+        assertEquals(CretaAtf.UDS_01A0, CretaAtf.selected)
+    }
+
     @Test fun silentTcmKeepsCardWithHintAndNeverTriggersAtzRecovery() = runBlocking {
         val (c, t) = elm { _, _ -> "NO DATA\r\r>" }
         c.ensureInitialized()

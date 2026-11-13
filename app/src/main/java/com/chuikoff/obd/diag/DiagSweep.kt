@@ -65,18 +65,19 @@ class DiagSweep(private val client: Elm327Client, private val onProgress: (Strin
                 (0x01..0x0F).forEach { tx(label, "21%02X".format(it), 3000) }
                 (0xA0..0xA5).forEach { tx(label, "21%02X".format(it), 3000) }
                 (0x01..0x06).forEach { tx(label, "2201%02X".format(it), 3000) }
+                (0xA0..0xA5).forEach { tx(label, "2201%02X".format(it), 3000) }
                 (0x01..0x05).forEach { tx(label, "2220%02X".format(it), 3000) }
                 listOf("222081", "222082", "22E001", "22E002", "22F190").forEach { tx(label, it, 3000) }
                 onProgress("коробка: $tx, сессия 10 03")
                 tx(label, "1003")
-                listOf("2101", "2102", "2103", "21A0", "220101", "222081").forEach { tx("$label 10 03", it, 3000) }
+                listOf("2101", "21A0", "2201A0", "220101", "222081").forEach { tx("$label 10 03", it, 3000) }
                 tx(label, "1001")
             }
             // Same TCM with the adapter's default flow control (some clones mishandle ATFCSM1)
             onProgress("коробка: 7E1 без FCSM1")
             val label = "АКПП@7E1 FC по умолч."
             listOf("ATSH7E1", "ATCRA7E9", "ATFCSM0").forEach { tx(label, it, 1500) }
-            listOf("2101", "21A0", "222081").forEach { tx(label, it, 3000) }
+            listOf("2201A0", "21A0", "222081").forEach { tx(label, it, 3000) }
         } finally {
             restore()
         }

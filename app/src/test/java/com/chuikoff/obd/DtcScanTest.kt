@@ -71,6 +71,30 @@ class DtcScanTest {
         assertTrue(DtcDecode.HYUNDAI_MODULES.all { it.rx.toInt(16) == it.tx.toInt(16) + 8 })
     }
 
+    @Test fun cretaTcmRealReplyHasOnlyNotTestedCodes() {
+        // exact 7E1 reply from the Creta (13.11.2026): 7F 19 78, then 16 DTCs with status 40/50
+        val raw = "7F1978\r043\r0:5902FF073100\r1:40073200400733\r2:00400734004007\r3:35004007290040\r" +
+            "4:07220040074100\r5:40C28700500717\r6:00400717004007\r7:22004007220040\r8:07060040070500\r\r>"
+        val r = DtcDecode.parseUds1902(raw, DiagModule("АКПП", "7E1", "7E9")) as DtcDecode.Reply.Codes
+        assertTrue(r.codes.isEmpty())
+        assertTrue(r.ignored >= 14)
+    }
+
+    @Test fun busyModuleIsRetried() = runBlocking {
+        var n = 0
+        val t = ScriptedElm { c ->
+            when {
+                c == "ATZ" -> "\r\rELM327 v1.5\r\r>"
+                c.startsWith("AT") -> "OK\r\r>"
+                c == "1902FF" -> if (n++ < 1) "7F1921\r\r>" else "5902FF56110009\r\r>"
+                else -> "NO DATA\r\r>"
+            }
+        }
+        val c = Elm327Client(t); c.ensureInitialized()
+        val rep = DtcScanner(c) {}.full()
+        assertTrue(rep.allCodes.any { it.code == "C1611" })
+    }
+
     @Test fun kwp17() {
         val r = DtcDecode.parseKwp("5701433501\r\r>", abs, 0x17) as DtcDecode.Reply.Codes
         assertEquals("C0335", r.codes.single().code)

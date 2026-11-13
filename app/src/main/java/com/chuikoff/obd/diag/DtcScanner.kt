@@ -95,16 +95,25 @@ class DtcScanner(
         val notes = mutableListOf<String>()
 
         suspend fun uds(req: String): DtcDecode.Reply {
-            val first = DtcDecode.parseUds1902(safeTx(req, tag), m)
-            if (first != DtcDecode.Reply.Pending) return first
-            delay(300)
-            return DtcDecode.parseUds1902(safeTx(req, tag), m)
+            var x = DtcDecode.parseUds1902(safeTx(req, tag), m)
+            // 78 = response pending, 21 = busy, repeat request (seen on the Creta MDPS 7D4)
+            for (attempt in 1..3) {
+                val retry = x == DtcDecode.Reply.Pending || (x as? DtcDecode.Reply.Negative)?.nrc == 0x21
+                if (!retry) return x
+                delay(300L * attempt)
+                x = DtcDecode.parseUds1902(safeTx(req, tag), m)
+            }
+            return x
         }
         suspend fun kwp(req: String, sid: Int): DtcDecode.Reply {
-            val first = DtcDecode.parseKwp(safeTx(req, tag), m, sid)
-            if (first != DtcDecode.Reply.Pending) return first
-            delay(300)
-            return DtcDecode.parseKwp(safeTx(req, tag), m, sid)
+            var x = DtcDecode.parseKwp(safeTx(req, tag), m, sid)
+            for (attempt in 1..3) {
+                val retry = x == DtcDecode.Reply.Pending || (x as? DtcDecode.Reply.Negative)?.nrc == 0x21
+                if (!retry) return x
+                delay(300L * attempt)
+                x = DtcDecode.parseKwp(safeTx(req, tag), m, sid)
+            }
+            return x
         }
         fun rejected(r: DtcDecode.Reply) = r is DtcDecode.Reply.Negative || r == DtcDecode.Reply.Junk || r == DtcDecode.Reply.Pending
 

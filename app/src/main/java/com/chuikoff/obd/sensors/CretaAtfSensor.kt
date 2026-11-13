@@ -23,7 +23,7 @@ object CretaAtf {
     const val SENSOR_ID = "atf_temp"
     const val REPROBE_AFTER = 10
 
-    enum class Layout { MODE21_A0, MODE22_2081 }
+    enum class Layout { MODE21_A0, MODE22_2081, MODE22_01A0 }
 
     data class Candidate(
         val key: String,
@@ -37,6 +37,13 @@ object CretaAtf {
         val label: String get() = "$request@$tx [${index}]"
     }
 
+    /**
+     * OBDb (Pelican) ELANTRA_ATF_T_7E1 / CERATO_ATF_T_7E1: 22 01A0 @7E1, bits 104–111 → byte 13 after
+     * 62 01 A0, val − 40 (same byte as the older 21A0 layout). Torque (cintakc, Sonata 2017): 2201A0,
+     * N·1.8−40 °F = N−40 °C. The Creta 2018 TCM is UDS-only: service 21 → 7F 21 11 (diag file 13.11).
+     */
+    val UDS_01A0 = Candidate("2201A0_7E1_13", "7E1", "7E9", "2201A0", Layout.MODE22_01A0, 13,
+        "OBDb Hyundai/Kia 2017+: 22 01A0@7E1, байт 13, X−40")
     val I30_21A0 = Candidate("21A0_7E1_13", "7E1", "7E9", "21A0", Layout.MODE21_A0, 13,
         "ScanGauge i30 2016 (A6GF1): 21A0@7E1, CF#2 → байт 13, X−40")
     val US_21A0 = Candidate("21A0_7E1_33", "7E1", "7E9", "21A0", Layout.MODE21_A0, 33,
@@ -47,7 +54,7 @@ object CretaAtf {
         "ScanGauge alt: 21A0@7E0, CF#5 → байт 33, X−40")
 
     /** Probe order (requests de-duplicated: 21A0@7E1 answers both index candidates). */
-    val CANDIDATES = listOf(I30_21A0, US_21A0, UDS_2081, ENG_21A0)
+    val CANDIDATES = listOf(UDS_01A0, I30_21A0, US_21A0, UDS_2081, ENG_21A0)
 
     /** Raw-only probes (once per connection) so the right byte can be found from the log. */
     val RAW_ONLY = listOf("7E1" to "2101", "7E1" to "2102")
@@ -70,6 +77,7 @@ object CretaAtf {
         val (hdr, len) = when (layout) {
             Layout.MODE21_A0 -> intArrayOf(0x61, 0xA0) to 2
             Layout.MODE22_2081 -> intArrayOf(0x62, 0x20, 0x81) to 3
+            Layout.MODE22_01A0 -> intArrayOf(0x62, 0x01, 0xA0) to 3
         }
         val m = msgs.firstOrNull { msg ->
             msg.bytes.size >= len && (0 until len).all { Elm327Parser.toUnsigned(msg.bytes[it]) == hdr[it] }
@@ -97,7 +105,7 @@ object CretaAtf {
      */
     fun choose(payloads: Map<Candidate, ByteArray?>): Candidate? {
         val i30 = payloads[I30_21A0]
-        val order = if ((i30?.size ?: 0) > US_21A0.index) listOf(US_21A0, I30_21A0, UDS_2081, ENG_21A0)
+        val order = if ((i30?.size ?: 0) > US_21A0.index) listOf(UDS_01A0, US_21A0, I30_21A0, UDS_2081, ENG_21A0)
         else CANDIDATES
         return order.firstOrNull { decode(payloads[it], it) != null }
     }

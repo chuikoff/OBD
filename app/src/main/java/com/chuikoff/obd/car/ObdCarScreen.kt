@@ -102,26 +102,27 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
                     .addText(statusLine)
                     .build()
             )
-            .addRow(
+        if ("coolant" !in snap.hidden) paneBuilder.addRow(
                 Row.Builder()
                     .setTitle("ОЖ")
                     .addText(fmt(TempColorScale.Kind.COOLANT, snap.coolantC))
                     .build()
             )
-            .addRow(
+        if ("gearbox" !in snap.hidden) paneBuilder.addRow(
                 Row.Builder()
                     .setTitle(snap.gearboxTitle)
                     .addText(fmt(TempColorScale.Kind.CVT, snap.cvtC))
                     .apply { snap.cvtLockup?.let { addText(it) } }
                     .build()
             )
-            .addRow(
+        if ("ambient" !in snap.hidden) paneBuilder.addRow(
                 Row.Builder()
                     .setTitle("Снаружи")
                     .addText(fmt(TempColorScale.Kind.AMBIENT, snap.ambientC))
                     .apply { snap.ambientNote?.let { addText(it) } }
                     .build()
             )
+        paneBuilder
             .addRow(engineRow(snap))
             .addAction(
                 if (snap.connected) {

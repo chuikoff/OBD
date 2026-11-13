@@ -154,11 +154,15 @@ class EngineExtras {
     private val fuel = Extra(ID_FUEL, "Средний расход (поездка)", "л/100км", pid = 0x10) { c -> readFuel(c) }
     private val all = listOf(voltage, rpm, fuel)
 
+    /** Cards the user hid on the «Показания» tab: not polled at all (saves bus time). */
+    @Volatile var userHidden: Set<String> = emptySet()
+
     /** Sensors to poll now (supported and not hidden), in card order. */
     fun sensors(): List<SensorDefinition> {
-        val s = supported ?: return listOf(voltage).filter { it.id !in hidden } // ATRV works without PID list
+        val off = hidden + userHidden
+        val s = supported ?: return listOf(voltage).filter { it.id !in off } // ATRV works without PID list
         return all.filter {
-            (it.pid == null || it.pid in s || (it.id == ID_FUEL && hasMap(s))) && it.id !in hidden
+            (it.pid == null || it.pid in s || (it.id == ID_FUEL && hasMap(s))) && it.id !in off
         }
     }
 

@@ -12,6 +12,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.runtime.remember
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -52,7 +59,8 @@ fun ReadingsScreen(
     cvtExport: () -> String = { "" },
     onSaveDiag: () -> Unit = {},
     onShareDiag: () -> Unit = {},
-    onResetFuelTrip: () -> Unit = {}
+    onResetFuelTrip: () -> Unit = {},
+    onSetHidden: (String, Boolean) -> Unit = { _, _ -> }
 ) {
     val showCvtDebug = state.selectedProfile.id == "mitsubishi_outlander_gf_gg"
     Column(
@@ -82,9 +90,13 @@ fun ReadingsScreen(
                 if (state.readings.isEmpty()) {
                     Text(if (state.isPolling) "Опрос датчиков…" else "Нет данных")
                 }
+                val visible = state.readings.filter { it.sensorId !in state.hiddenReadings }
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(state.readings, key = { it.sensorId }) { reading ->
-                        ReadingCard(reading)
+                    items(visible, key = { it.sensorId }) { reading ->
+                        ReadingCard(reading, onHide = { onSetHidden(reading.sensorId, true) })
+                    }
+                    item(key = "visibility") {
+                        VisibilityBlock(state, onSetHidden)
                     }
                     item(key = "diagnostics") {
                         DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag, onResetFuelTrip)
@@ -95,6 +107,58 @@ fun ReadingsScreen(
         if (showCvtDebug && state.connectionState !is ConnectionState.Connected && state.cvtLog.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag, onResetFuelTrip)
+        }
+    }
+}
+
+/** Names for cards that may be hidden (and so not polled → absent from [ObdUiState.readings]). */
+private val KNOWN_CARDS = linkedMapOf(
+    "coolant_temp" to "Температура ОЖ",
+    "cvt_temp" to "Температура CVT",
+    com.chuikoff.obd.sensors.CretaAtf.SENSOR_ID to "Температура АКПП",
+    "ambient_temp" to "Температура снаружи",
+    com.chuikoff.obd.sensors.EngineExtras.ID_VOLTAGE to "Напряжение",
+    com.chuikoff.obd.sensors.EngineExtras.ID_RPM to "Обороты",
+    com.chuikoff.obd.sensors.EngineExtras.ID_FUEL to "Средний расход"
+)
+
+/** Collapsible «Показания на экране»: checkboxes to show cards hidden by long-press. */
+@Composable
+private fun VisibilityBlock(state: ObdUiState, onSetHidden: (String, Boolean) -> Unit) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    val names = linkedMapOf<String, String>()
+    state.readings.forEach { names[it.sensorId] = it.displayName }
+    state.hiddenReadings.forEach { id -> if (id !in names) names[id] = KNOWN_CARDS[id] ?: id }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Показания на экране" + if (state.hiddenReadings.isNotEmpty()) " (скрыто: ${state.hiddenReadings.size})" else "",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { open = !open }) { Text(if (open) "Свернуть" else "Настроить") }
+            }
+            if (open) {
+                Text(
+                    "Долгое нажатие на карточку — «Скрыть». Скрытые не показываются и в Android Auto; " +
+                        "напряжение, обороты и расход при этом не опрашиваются. Предупреждения (перегрев, гололёд) работают всегда.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                names.forEach { (id, name) ->
+                    val shown = id !in state.hiddenReadings
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .toggleable(value = shown, onValueChange = { onSetHidden(id, !it) }),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(checked = shown, onCheckedChange = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(name)
+                    }
+                }
+            }
         }
     }
 }
@@ -185,8 +249,10 @@ private fun SensorTechInfo(reading: SensorReading, onResetFuelTrip: () -> Unit =
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ReadingCard(reading: SensorReading) {
+private fun ReadingCard(reading: SensorReading, onHide: () -> Unit = {}) {
+    var menu by remember { mutableStateOf(false) }
     val kind = TempColorScale.kindFor(reading.sensorId, reading.displayName)
     // No color for "—": band only when a value is actually shown
     val band = if (kind != null && reading.value != null)
@@ -198,9 +264,17 @@ private fun ReadingCard(reading: SensorReading) {
     }
 
     Card(
-        Modifier.fillMaxWidth(),
+        Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = {}, onLongClick = { menu = true }),
         colors = CardDefaults.cardColors(containerColor = cardTint)
     ) {
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text("Скрыть «${reading.displayName}»") },
+                onClick = { menu = false; onHide() }
+            )
+        }
         Column(Modifier.padding(16.dp)) {
             Text(reading.displayName, style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(4.dp))

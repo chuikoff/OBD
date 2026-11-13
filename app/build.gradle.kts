@@ -11,8 +11,8 @@ android {
         applicationId = "com.chuikoff.obd"
         minSdk = 26
         targetSdk = 34
-        versionCode = 28
-        versionName = "1.14.9"
+        versionCode = 29
+        versionName = "1.15.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
     }

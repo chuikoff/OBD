@@ -55,6 +55,8 @@ import kotlinx.coroutines.launch
 data class ObdUiState(
     val profiles: List<VehicleProfile> = VehicleProfileRegistry.all(),
     val selectedProfile: VehicleProfile = VehicleProfileRegistry.default,
+    /** Card ids the user hid for [selectedProfile] (long-press «Скрыть»), saved per profile. */
+    val hiddenReadings: Set<String> = emptySet(),
     val preferredTransport: TransportType = TransportType.CLASSIC_SPP,
     val devices: List<DiscoveredDevice> = emptyList(),
     val isScanning: Boolean = false,
@@ -221,6 +223,7 @@ class ObdController private constructor(private val app: Application) {
                 cvtOil = CvtOilDegradation.deserialize(settingsPrefs.getString(K_OIL, null))
             )
         }
+        loadHidden()
         scope.launch {
             CvtDebugLog.entries.collect { list -> _ui.update { it.copy(cvtLog = list) } }
         }
@@ -260,6 +263,23 @@ class ObdController private constructor(private val app: Application) {
     }
 
     fun clearCvtLog() = CvtDebugLog.clear()
+
+    private fun hiddenKey(profileId: String) = "hidden_readings_$profileId"
+
+    private fun loadHidden() {
+        val set = settingsPrefs.getStringSet(hiddenKey(_ui.value.selectedProfile.id), null)?.toSet() ?: emptySet()
+        engineExtras.userHidden = set
+        _ui.update { it.copy(hiddenReadings = set) }
+        publishLiveFromReadings(_ui.value.readings, _ui.value.connectionState is ConnectionState.Connected)
+    }
+
+    /** Long-press «Скрыть» / checkbox in «Показания»: per profile, survives restarts, also hides it in Android Auto. */
+    fun setReadingHidden(sensorId: String, hide: Boolean) {
+        val cur = _ui.value.hiddenReadings
+        val next = if (hide) cur + sensorId else cur - sensorId
+        settingsPrefs.edit().putStringSet(hiddenKey(_ui.value.selectedProfile.id), next).apply()
+        loadHidden()
+    }
 
     /** «Сбросить» for the trip average fuel consumption (also reset on every new connection). */
     fun resetFuelTrip() = engineExtras.trip.reset()
@@ -340,6 +360,7 @@ class ObdController private constructor(private val app: Application) {
     fun selectProfile(profile: VehicleProfile) {
         settingsPrefs.edit().putString(K_PROFILE, profile.id).apply()
         _ui.update { it.copy(selectedProfile = profile) }
+        loadHidden()
         CretaAtf.reset()
         if (_ui.value.connectionState is ConnectionState.Connected) {
             restartPolling()
@@ -1092,6 +1113,7 @@ class ObdController private constructor(private val app: Application) {
             CretaAtf.reset()
             com.chuikoff.obd.sensors.CretaAmbient.reset()
             _ui.update { it.copy(selectedProfile = match, statusMessage = "Профиль выбран по VIN: ${match.displayNameRu}") }
+            loadHidden()
         }
     }
 
@@ -1251,7 +1273,8 @@ class ObdController private constructor(private val app: Application) {
     }
 
     private fun publishLiveFromReadings(readings: List<SensorReading>, connected: Boolean) {
-        fun byId(id: String) = readings.find { it.sensorId == id }
+        val hidden = _ui.value.hiddenReadings
+        fun byId(id: String) = readings.find { it.sensorId == id && it.sensorId !in hidden }
         val coolant = byId("coolant_temp")
         val cvt = byId("cvt_temp") ?: byId(CretaAtf.SENSOR_ID)
         val ambient = byId("ambient_temp")
@@ -1291,8 +1314,19 @@ class ObdController private constructor(private val app: Application) {
             ambientNote = ambientNote,
             cvtLockup = cvtLockup,
             engine = engine,
-            gearboxTitle = if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) "CVT" else "Коробка"
+            gearboxTitle = if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) "CVT" else "Коробка",
+            hidden = carHidden()
         )
+    }
+
+    /** Android Auto rows the user hid on the phone: «coolant», «gearbox», «ambient». */
+    private fun carHidden(): Set<String> {
+        val h = _ui.value.hiddenReadings
+        return buildSet {
+            if ("coolant_temp" in h) add("coolant")
+            if ("cvt_temp" in h || CretaAtf.SENSOR_ID in h) add("gearbox")
+            if ("ambient_temp" in h) add("ambient")
+        }
     }
 
     /** Activity destroyed: the connection stays (Android Auto / notification «Стоп»), only scanning stops. */

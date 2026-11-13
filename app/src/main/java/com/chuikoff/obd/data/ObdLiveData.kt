@@ -22,6 +22,8 @@ object ObdLiveData {
         val engine: EngineLive? = null,
         /** Card title for the gearbox row: «CVT» (Outlander) or «Коробка» (6AT). */
         val gearboxTitle: String = "CVT",
+        /** Rows hidden by the user on the phone: «coolant», «gearbox», «ambient». */
+        val hidden: Set<String> = emptySet(),
         val updatedAtMs: Long = 0L
     )
 
@@ -45,7 +47,8 @@ object ObdLiveData {
         ambientNote: String? = null,
         cvtLockup: String? = null,
         engine: EngineLive? = null,
-        gearboxTitle: String = "CVT"
+        gearboxTitle: String = "CVT",
+        hidden: Set<String> = emptySet()
     ) {
         val now = System.currentTimeMillis()
         val snap = Snapshot(
@@ -58,6 +61,7 @@ object ObdLiveData {
             cvtLockup = cvtLockup,
             engine = engine,
             gearboxTitle = gearboxTitle,
+            hidden = hidden,
             updatedAtMs = now
         )
         _snapshot.value = snap

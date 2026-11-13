@@ -95,6 +95,19 @@ fun DiagnosticsScreen(
                 item { Text(ecu, style = MaterialTheme.typography.titleMedium) }
                 items(codes) { DtcCard(it) }
             }
+            val inactive = report.inactiveCodes
+            if (inactive.isNotEmpty()) {
+                item {
+                    Text("Неактивные / история (${inactive.size})", style = MaterialTheme.typography.titleMedium)
+                    Text("Записаны в памяти блока, но сейчас не активны (тест в этой поездке не выполнялся или ошибка была раньше). Лампу не зажигают.",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                inactive.groupBy { it.ecuName }.forEach { (ecu, codes) ->
+                    item { Text(ecu, style = MaterialTheme.typography.titleSmall) }
+                    items(codes) { DtcCard(it) }
+                }
+            }
+            if (report.modules != null) item { TpmsCard(report.tpms) }
             report.modules?.let { mods ->
                 item { Text("Блоки (полная проверка)", style = MaterialTheme.typography.titleMedium) }
                 items(mods) { ModuleRow(it) }
@@ -166,6 +179,22 @@ private fun MilCard(r: DtcReport) {
                 Text("Ни один ЭБУ не ответил на OBD-запросы (зажигание включено?).",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
+        }
+    }
+}
+
+@Composable
+private fun TpmsCard(results: List<com.chuikoff.obd.diag.Tpms.Result>) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Давление в шинах (TPMS)", style = MaterialTheme.typography.titleMedium)
+            if (results.isEmpty()) Text("Блоки TPMS (7A0 C00B, 7D6, ABS C104) данных не отдали.", style = MaterialTheme.typography.bodySmall)
+            results.forEach { r ->
+                Text(r.sourceRu, style = MaterialTheme.typography.labelLarge)
+                r.wheels.forEach { Text(it.text(), style = MaterialTheme.typography.bodyMedium) }
+                r.noteRu?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+            Text(com.chuikoff.obd.diag.Tpms.HINT_RU, style = MaterialTheme.typography.bodySmall)
         }
     }
 }

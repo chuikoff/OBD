@@ -84,6 +84,32 @@ class DiagSweep(private val client: Elm327Client, private val onProgress: (Strin
         out.toList()
     }
 
+    /** Creta: outdoor temperature (climate/cluster/BCM) and TPMS candidates, RAW only. */
+    suspend fun bodyClimate(): List<Line> = client.probing {
+        out.clear()
+        try {
+            val plan = listOf(
+                Triple("7B3", "7BB", listOf("220100", "220101", "220102", "2101", "2102", "2103", "2180")),
+                Triple("7C6", "7CE", listOf("22B001", "22B002", "22B003", "22B004", "22B005", "22B006", "2101", "2102")),
+                Triple("7A0", "7A8", listOf("22C00B", "22C001", "22C002", "22B001", "22B002", "22B003", "22B004", "2101", "2106")),
+                Triple("7D6", "7DE", listOf("2106", "2101", "22C00B")),
+                Triple("7D1", "7D9", listOf("22C104", "22C101"))
+            )
+            for ((t, r, cmds) in plan) {
+                val label = "КУЗОВ@$t"
+                onProgress("климат/шины: $t")
+                Elm327Client.ecuAddressing(t, r).forEach { tx(label, it, 1500) }
+                cmds.forEach { tx(label, it, 2500) }
+                tx(label, "1003")
+                cmds.take(2).forEach { tx("$label 10 03", it, 2500) }
+            }
+            for (c in listOf("ATSH7DF", "ATCRA", "0146", "0170")) tx("OBD 7DF", c, 3000)
+        } finally {
+            restore()
+        }
+        out.toList()
+    }
+
     private suspend fun restore() = withContext(NonCancellable) {
         runCatching { client.send("ATH0", timeoutMs = 1500) }
         runCatching { client.restoreEngineEcuFilter() }

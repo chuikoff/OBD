@@ -38,15 +38,35 @@ class Mode01TempSensorTest {
         assertEquals("Нет данных (NO DATA / parse)", bad.error)
     }
 
-    @Test fun cretaAmbientRangeAndNotes() = runBlocking {
+    @Test fun cretaAmbientFallsBackTo0146() = runBlocking {
+        com.chuikoff.obd.sensors.CretaAmbient.reset()
         val amb = Creta2018Profile().sensors().first { it.id == "ambient_temp" }
         val ok = amb.read(client("", "41463C\r\r>"))
         assertEquals(20.0, ok.value!!, 0.0)
-        assertEquals("SAE 0146 (может отличаться от приборки). TODO: cluster PID", ok.note)
+        assertEquals("ЭБУ SAE 0146 (приборка может показывать на 1–2° ниже)", ok.note)
+        assertEquals(false, com.chuikoff.obd.sensors.CretaAmbient.useClimate)
         val hot = amb.read(client("", "4146FF\r\r>"))
         assertNull(hot.value)
-        assertEquals("0146 вне −40…60 (°C=215.0)", hot.error)
-        assertEquals(amb.caveatRu, hot.note)
-        assertEquals("Нет данных SAE 0146", amb.read(client("", "NO DATA\r\r>")).error)
+        assertEquals("Нет данных (0146 и климат 7B3)", hot.error)
+    }
+
+    @Test fun cretaAmbientPrefersClimateWhenPlausible() = runBlocking {
+        com.chuikoff.obd.sensors.CretaAmbient.reset()
+        // 0146 = 6 °C; climate byte 6 = 0x58 = 88 → 88/2−40 = 4 °C
+        val c = Elm327Client(ScriptedElm { cmd ->
+            when {
+                cmd.startsWith("AT") -> "OK\r\r>"
+                cmd == "0146" -> "41462E\r\r>"
+                cmd == "220100" -> "6201000000000000005800\r\r>"
+                else -> "NO DATA\r\r>"
+            }
+        })
+        val r = Creta2018Profile().sensors().first { it.id == "ambient_temp" }.read(c)
+        assertEquals(4.0, r.value!!, 0.0)
+        assertEquals(true, com.chuikoff.obd.sensors.CretaAmbient.useClimate)
+        // implausible (+30 vs 0146) → rejected
+        assertNull(com.chuikoff.obd.sensors.CretaAmbient.decodeClimate("620100000000000000\r\r>"))
+        assertEquals(false, com.chuikoff.obd.sensors.CretaAmbient.plausible(30.0, 6.0))
+        com.chuikoff.obd.sensors.CretaAmbient.reset()
     }
 }

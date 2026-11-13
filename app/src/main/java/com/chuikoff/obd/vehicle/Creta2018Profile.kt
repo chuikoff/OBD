@@ -2,7 +2,7 @@ package com.chuikoff.obd.vehicle
 
 import com.chuikoff.obd.sensors.CoolantTempSensor
 import com.chuikoff.obd.sensors.CretaAtfSensor
-import com.chuikoff.obd.sensors.Mode01TempSensor
+import com.chuikoff.obd.sensors.CretaAmbientSensor
 import com.chuikoff.obd.sensors.SensorDefinition
 
 /**
@@ -12,7 +12,7 @@ import com.chuikoff.obd.sensors.SensorDefinition
  * Gearbox (ATF) temperature: [CretaAtfSensor] — EXPERIMENTAL, ScanGauge candidates probed once
  *  per connection (21A0@7E1 byte 13 / 33, 22 2081@7E1, 21A0@7E0), RAW of every probe in the CVT log.
  *  Always shown (with an error text when nothing was found).
- * Ambient: SAE 0146 only (may differ from cluster; no intake 010F as outdoor).
+ * Ambient: climate 7B3 22 0100 (experimental) → fallback SAE 0146, dashboard-like filter.
  */
 class Creta2018Profile : VehicleProfile {
 
@@ -20,31 +20,13 @@ class Creta2018Profile : VehicleProfile {
     override val displayNameRu: String = "Hyundai Creta (2018)"
     override val years: String = "2018"
     override val notesRu: String =
-        "ОЖ: PID 05. Снаружи: SAE 0146 (может отличаться от приборки). " +
+        "ОЖ: PID 05. Снаружи: климат 7B3 (эксп.) или SAE 0146, фильтр как у приборки. " +
             "АКПП A6GF1 (экспериментально): 21A0@7E1 (ScanGauge, X−40), запасные 22 2081 и 21A0@7E0."
 
     override fun sensors(): List<SensorDefinition> = listOfNotNull(
         CoolantTempSensor(),
         CretaAtfSensor(), // always shown on the Creta (6AT): an error text beats a missing card
-        CretaAmbientTempSensor()
+        CretaAmbientSensor()
     )
 }
 
-/**
- * SAE 0146 only. Never show intake 010F as outdoor.
- * TODO: Creta cluster outdoor PID unknown — cannot invent one.
- */
-private fun CretaAmbientTempSensor(): SensorDefinition {
-    val caveat = "SAE 0146 (может отличаться от приборки). TODO: cluster outdoor PID."
-    return Mode01TempSensor(
-        id = "ambient_temp",
-        displayNameRu = "Температура снаружи",
-        pid = 0x46,
-        noDataError = "Нет данных SAE 0146",
-        validRange = -40.0..60.0,
-        outOfRangeError = { c -> "0146 вне −40…60 (°C=$c)" },
-        caveatRu = caveat,
-        errorNote = caveat,
-        okNote = "SAE 0146 (может отличаться от приборки). TODO: cluster PID"
-    )
-}

@@ -85,12 +85,15 @@ object DtcDecode {
         if (s and 0x04 != 0) parts += "pending"
         if (s and 0x80 != 0) parts += "лампа"
         if (s and 0x01 == 0 && s and 0x08 != 0) parts += "в памяти"
+        if (s and 0x40 != 0 && parts.isEmpty()) parts += "тест в этой поездке ещё не выполнялся"
+        if (s and 0x10 != 0 && s and 0x01 == 0 && s and 0x08 == 0) parts += "не проверялась после сброса"
         if (parts.isEmpty()) parts += "не активна"
         return parts.joinToString(", ") + " (статус %02X)".format(s)
     }
 
     sealed class Reply {
-        data class Codes(val codes: List<DtcEntry>, val ignored: Int) : Reply()
+        /** [inactive]: listed by the ECU but not failed/confirmed/pending (e.g. status 40 «not tested yet»). */
+        data class Codes(val codes: List<DtcEntry>, val ignored: Int, val inactive: List<DtcEntry> = emptyList()) : Reply()
         data class Negative(val nrc: Int) : Reply()
         object Pending : Reply()
         object None : Reply()
@@ -104,13 +107,15 @@ object DtcDecode {
         msgs.firstOrNull { it.bytes.size >= 2 && toUnsigned(it.bytes[0]) == 0x59 && toUnsigned(it.bytes[1]) == 0x02 }?.let { m ->
             val body = m.bytes.drop(3) // skip 59 02 availabilityMask
             var ignored = 0
+            val inactive = mutableListOf<DtcEntry>()
             val codes = body.chunked(4).filter { it.size == 4 }.mapNotNull { g ->
                 val st = toUnsigned(g[3])
                 val code = formatUds(toUnsigned(g[0]), toUnsigned(g[1]), toUnsigned(g[2])) ?: return@mapNotNull null
-                if (st and UDS_ACTIVE_MASK == 0) { ignored++; return@mapNotNull null }
-                DtcEntry(code, module.rx, "${module.name} (${module.rx})", DtcKind.UDS, st, udsStatusRu(st))
+                val e = DtcEntry(code, module.rx, "${module.name} (${module.rx})", DtcKind.UDS, st, udsStatusRu(st))
+                if (st and UDS_ACTIVE_MASK == 0) { ignored++; inactive += e; return@mapNotNull null }
+                e
             }.distinctBy { it.code }
-            return Reply.Codes(codes, ignored)
+            return Reply.Codes(codes, ignored, inactive.distinctBy { it.code })
         }
         return negativeOr(msgs, 0x19)
     }

@@ -174,3 +174,29 @@ class DtcScanTest {
         assertTrue(rep.summaryRu().contains("ГОРИТ"))
     }
 }
+
+class TpmsTest {
+    @org.junit.Test fun bcmRioLayout() {
+        // 62 C0 0B + 4 header bytes + FL(press,temp,x,x) FR RR RL ; 0xA0=160 → 32 psi ≈ 2.21 bar, temp 0x3C → 10 °C
+        val raw = "62C00B00000000A03C0000A03C00009B3C0000A03C0000\r\r>"
+        val r = com.chuikoff.obd.diag.Tpms.parseBcm(raw)!!
+        org.junit.Assert.assertEquals(4, r.wheels.size)
+        org.junit.Assert.assertEquals(2.21, r.wheels[0].bar!!, 0.01)
+        org.junit.Assert.assertEquals(10, r.wheels[0].tempC)
+        org.junit.Assert.assertEquals("ЗП", r.wheels[2].pos)
+        org.junit.Assert.assertEquals(2.14, r.wheels[2].bar!!, 0.01)
+    }
+
+    @org.junit.Test fun nrcIsNotAResult() {
+        org.junit.Assert.assertNull(com.chuikoff.obd.diag.Tpms.parseBcm("7F2231\r\r>"))
+        org.junit.Assert.assertNull(com.chuikoff.obd.diag.Tpms.parseModule("NO DATA\r\r>"))
+    }
+
+    @org.junit.Test fun inactiveCodesAreKept() {
+        val m = com.chuikoff.obd.diag.DtcDecode.HYUNDAI_MODULES.first { it.tx == "7E1" }
+        val r = com.chuikoff.obd.diag.DtcDecode.parseUds1902("5902FF0731004007320050010700AF\r\r>", m)
+        val c = r as com.chuikoff.obd.diag.DtcDecode.Reply.Codes
+        org.junit.Assert.assertEquals(listOf("P0731", "P0732"), c.inactive.map { it.code })
+        org.junit.Assert.assertEquals(listOf("P0107"), c.codes.map { it.code })
+    }
+}

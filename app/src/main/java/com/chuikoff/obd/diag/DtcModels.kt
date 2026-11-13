@@ -35,7 +35,9 @@ data class ModuleResult(
     val codes: List<DtcEntry>,
     /** Codes the ECU listed but which are not active/confirmed (e.g. status 0x50). */
     val ignored: Int = 0,
-    val note: String? = null
+    val note: String? = null,
+    /** Listed but not active (history / not tested this cycle) — shown separately, never hidden. */
+    val inactive: List<DtcEntry> = emptyList()
 )
 
 /** Mode 01 PID 01 per ECU. */
@@ -49,8 +51,11 @@ data class DtcReport(
     /** Which OBD modes got any answer (positive or NRC) — «NO DATA» everywhere = no answer. */
     val obdAnswered: Boolean,
     /** Null until a full check ran. */
-    val modules: List<ModuleResult>? = null
+    val modules: List<ModuleResult>? = null,
+    /** Tyre pressure readouts found during the full check (empty = no TPMS data answered). */
+    val tpms: List<Tpms.Result> = emptyList()
 ) {
+    val inactiveCodes: List<DtcEntry> get() = modules?.flatMap { it.inactive } ?: emptyList()
     val milOn: Boolean? get() = if (mil.isEmpty()) null else mil.any { it.milOn }
     val milReportedCount: Int get() = mil.sumOf { it.dtcCount }
     val allCodes: List<DtcEntry> get() = obdCodes + (modules?.flatMap { it.codes } ?: emptyList())
@@ -77,6 +82,13 @@ data class DtcReport(
         } else {
             append("Найдено кодов: ${codes.size}.")
             if (modules == null) append(" Для ABS/подушек/кузова — «Полная проверка».")
+        }
+        val inactiveN = inactiveCodes.map { it.code }.distinct().size
+        if (inactiveN > 0) append(" Неактивных/в истории: $inactiveN (отдельный список).")
+        if (modules != null) {
+            val w = tpms.flatMap { it.wheels }.filter { it.bar != null }
+            if (w.isNotEmpty()) append(" Шины: " + w.joinToString(", ") { it.text() } + ".")
+            else append(" TPMS: давление не прочитано; горящая лампа шин без кода = обычно низкое давление.")
         }
     }
 }

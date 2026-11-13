@@ -83,7 +83,9 @@ class DtcScanner(
         // physical OBD modes of the engine/TCM may list codes the functional request missed
         val merged = (physicalObd + q.obdCodes).sortedBy { if (it.ecuId == null) 1 else 0 }
             .distinctBy { it.code to it.kind }
-        return q.copy(timestampMs = System.currentTimeMillis(), modules = results, obdCodes = merged)
+        onProgress("давление в шинах (TPMS)")
+        val tpms = client.probing { try { Tpms.probe(client) { l -> log(l) } } finally { restore() } }
+        return q.copy(timestampMs = System.currentTimeMillis(), modules = results, obdCodes = merged, tpms = tpms)
     }
 
     private val physicalObd = mutableListOf<DtcEntry>()
@@ -140,7 +142,7 @@ class DtcScanner(
             r = uds("1902FF")
             if (rejected(r)) r = uds("190209")
         }
-        if (r is DtcDecode.Reply.Codes) return ModuleResult(m, true, "UDS 19 02", r.codes, r.ignored, notes.joinToString("; ").ifEmpty { null })
+        if (r is DtcDecode.Reply.Codes) return ModuleResult(m, true, "UDS 19 02", r.codes, r.ignored, notes.joinToString("; ").ifEmpty { null }, r.inactive)
         if (r is DtcDecode.Reply.Negative) notes += "UDS: ${DtcDecode.nrcRu(r.nrc)}"
         if (r != DtcDecode.Reply.None) answered = true
 

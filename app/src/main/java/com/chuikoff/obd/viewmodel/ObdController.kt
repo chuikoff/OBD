@@ -166,7 +166,7 @@ class ObdController private constructor(private val app: Application) {
         override suspend fun process(client: Elm327Client, reading: SensorReading, outlander: Boolean): SensorReading =
             when {
                 reading.sensorId == "cvt_temp" -> applyCvt(reading)
-                reading.sensorId == "ambient_temp" && outlander -> applyAmbientFilter(client, reading)
+                reading.sensorId == "ambient_temp" -> applyAmbientFilter(client, reading) // Outlander AWC + Creta
                 else -> reading
             }
         override fun publish(readings: List<SensorReading>) {
@@ -436,6 +436,7 @@ class ObdController private constructor(private val app: Application) {
             cvtLockup.reset()
             CvtPollPace.reset()
             CretaAtf.reset()
+            com.chuikoff.obd.sensors.CretaAmbient.reset()
             lastCvtStatusLine = null
             lastCvtStatusArgb = null
             resetAmbient()
@@ -557,6 +558,7 @@ class ObdController private constructor(private val app: Application) {
             cvtLockup.reset()
             CvtPollPace.reset()
             CretaAtf.reset()
+            com.chuikoff.obd.sensors.CretaAmbient.reset()
             lastCvtStatusLine = null
             lastCvtStatusArgb = null
             resetAmbient()
@@ -632,6 +634,17 @@ class ObdController private constructor(private val app: Application) {
                 r.mil.forEach { append("MIL ${it.ecuId ?: "?"}: ${if (it.milOn) "ГОРИТ" else "нет"}, кодов ${it.dtcCount}\n") }
                 r.allCodes.forEach { c ->
                     append("${c.code} — ${c.ecuName} — ${c.kind.titleRu}${c.statusRu?.let { " — $it" } ?: ""}\n")
+                }
+                val inactive = r.inactiveCodes
+                if (inactive.isNotEmpty()) {
+                    append("Неактивные / история (${inactive.size}):\n")
+                    inactive.forEach { c -> append("  ${c.code} — ${c.ecuName}${c.statusRu?.let { " — $it" } ?: ""}\n") }
+                }
+                if (r.modules != null) {
+                    append("TPMS: ").append(if (r.tpms.isEmpty()) "нет данных" else "").append("\n")
+                    r.tpms.forEach { t ->
+                        append("  ${t.sourceRu}: ${t.wheels.joinToString("; ") { it.text() }}${t.noteRu?.let { " $it" } ?: ""} RAW ${t.raw}\n")
+                    }
                 }
                 r.modules?.forEach { m ->
                     append("[${m.module.tx}→${m.module.rx}] ${m.module.name}: ")
@@ -719,7 +732,7 @@ class ObdController private constructor(private val app: Application) {
                     poller.paused(client) {
                         val sweep = com.chuikoff.obd.diag.DiagSweep(client) { p -> _ui.update { it.copy(diagStatus = "Сбор диагностики: $p…") } }
                         adapter = sweep.adapterInfo()
-                        if (_ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID) gearbox = sweep.gearbox()
+                        if (_ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID) gearbox = sweep.bodyClimate() + sweep.gearbox()
                     }
                 }
                 val text = diagnosticsText(adapter, gearbox)
@@ -768,13 +781,13 @@ class ObdController private constructor(private val app: Application) {
         if (adapter.isNotEmpty()) { section("АДАПТЕР И ОТВЕЧАЮЩИЕ ЭБУ (прочитано сейчас)"); adapter.forEach { append(it.toText()).append('\n') } }
         if (gearbox.isNotEmpty()) {
             // answers with data first (short), full list later — the top of the file must be enough
-            section("КОРОБКА: ОТВЕТЫ С ДАННЫМИ (7E1/7E0)")
+            section("КЛИМАТ / ШИНЫ / КОРОБКА: ОТВЕТЫ С ДАННЫМИ")
             gearbox.filter { l -> Elm327Parser.assemble(l.raw).any { it.bytes.isNotEmpty() && Elm327Parser.toUnsigned(it.bytes[0]) != 0x7F } }
                 .forEach { append(it.toText()).append('\n') }
         }
         section("ОШИБКИ: СВОДКА")
         append(if (s.dtcReport == null) "проверку ещё не запускали\n" else dtcExportText(includeRaw = false))
-        if (gearbox.isNotEmpty()) { section("КОРОБКА: ВЕСЬ ОПРОС"); gearbox.forEach { append(it.toText()).append('\n') } }
+        if (gearbox.isNotEmpty()) { section("КЛИМАТ / ШИНЫ / КОРОБКА: ВЕСЬ ОПРОС"); gearbox.forEach { append(it.toText()).append('\n') } }
         if (s.dtcLog.isNotEmpty()) {
             section("ОШИБКИ: RAW (${s.dtcLog.size})")
             s.dtcLog.forEach { append(it.toText()).append('\n') }
@@ -1034,6 +1047,7 @@ class ObdController private constructor(private val app: Application) {
         if (match.id != _ui.value.selectedProfile.id) {
             settingsPrefs.edit().putString(K_PROFILE, match.id).apply()
             CretaAtf.reset()
+            com.chuikoff.obd.sensors.CretaAmbient.reset()
             _ui.update { it.copy(selectedProfile = match, statusMessage = "Профиль выбран по VIN: ${match.displayNameRu}") }
         }
     }

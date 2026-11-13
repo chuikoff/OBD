@@ -53,7 +53,9 @@ data class DtcReport(
     /** Null until a full check ran. */
     val modules: List<ModuleResult>? = null,
     /** Tyre pressure readouts found during the full check (empty = no TPMS data answered). */
-    val tpms: List<Tpms.Result> = emptyList()
+    val tpms: List<Tpms.Result> = emptyList(),
+    /** true = full check (all addresses), false = quick (OBD + the profile's key modules). */
+    val full: Boolean = false
 ) {
     val inactiveCodes: List<DtcEntry> get() = modules?.flatMap { it.inactive } ?: emptyList()
     val milOn: Boolean? get() = if (mil.isEmpty()) null else mil.any { it.milOn }
@@ -70,22 +72,24 @@ data class DtcReport(
         }
         if (codes.isEmpty()) {
             append("Кодов не найдено")
-            if (modules == null) {
-                append(if (milOn == true) " — но лампа горит: нажмите «Полная проверка»."
-                else ". Если на панели горит другая лампа (ABS, ESP, подушки, руль…) — нажмите «Полная проверка».")
-            } else {
-                val silent = modules.count { !it.answered }
-                append(" ни в одном из ${modules.size - silent} ответивших блоков")
-                if (silent > 0) append(" ($silent не ответили)")
+            val mods = modules
+            if (mods != null) {
+                val silent = mods.count { !it.answered }
+                append(" ни в одном из ${mods.size - silent} ответивших блоков")
+                if (silent > 0) append(" ($silent нет ответа / нет блока)")
                 append('.')
+            }
+            if (!full) {
+                append(if (milOn == true) " Лампа горит — нажмите «Полная проверка»."
+                else " Если на панели горит другая лампа (подушки, руль, кузов…) — нажмите «Полная проверка».")
             }
         } else {
             append("Найдено кодов: ${codes.size}.")
-            if (modules == null) append(" Для ABS/подушек/кузова — «Полная проверка».")
+            if (!full) append(" Подушки, руль, кузов и прочее — «Полная проверка».")
         }
         val inactiveN = inactiveCodes.map { it.code }.distinct().size
         if (inactiveN > 0) append(" Неактивных/в истории: $inactiveN (отдельный список).")
-        if (modules != null) {
+        if (full) {
             val w = tpms.flatMap { it.wheels }.filter { it.bar != null }
             if (w.isNotEmpty()) append(" Шины: " + w.joinToString(", ") { it.text() } + ".")
             else append(" TPMS: давление не прочитано; горящая лампа шин без кода = обычно низкое давление.")

@@ -228,6 +228,36 @@ class CretaTpmsDtcTest {
         org.junit.Assert.assertTrue(out.textRu().startsWith("код вернулся"))
     }
 
+    @org.junit.Test fun quickReadsProfileModulesAndSkipsAbsentFast() = kotlinx.coroutines.runBlocking {
+        var header = "7E0"
+        val perHeader = mutableMapOf<String, Int>()
+        val t = ScriptedElm { c ->
+            if (!c.startsWith("AT")) perHeader[header] = (perHeader[header] ?: 0) + 1
+            when {
+                c == "ATZ" -> "\r\rELM327 v1.5\r\r>"
+                c.startsWith("ATSH") -> { header = c.removePrefix("ATSH"); "OK\r\r>" }
+                c.startsWith("AT") -> "OK\r\r>"
+                header == "7DF" && c == "0101" -> "41010007E500\r\r>"
+                header == "7DF" && c == "03" -> "4300\r\r>"
+                header == "7A0" && c == "1902FF" -> "590209\r\r>"
+                header == "7A0" && c == "190209" -> "00F\r0:59020953130089\r1:56620009566300\r2:09AAAAAAAAAAAA\r\r>"
+                header == "7D1" && c == "1902FF" -> "5902FF\r\r>"
+                else -> "NO DATA\r\r>"
+            }
+        }
+        val c = com.chuikoff.obd.elm327.Elm327Client(t); c.ensureInitialized()
+        val rep = com.chuikoff.obd.diag.DtcScanner(c) {}.quick(com.chuikoff.obd.diag.DtcDecode.QUICK_CRETA)
+        org.junit.Assert.assertFalse(rep.full)
+        org.junit.Assert.assertEquals(com.chuikoff.obd.diag.DtcDecode.QUICK_CRETA.size, rep.modules!!.size)
+        org.junit.Assert.assertEquals(listOf("C1313", "C1662", "C1663"), rep.allCodes.map { it.code })
+        val absent = rep.modules!!.first { it.module.tx == "7E7" }
+        org.junit.Assert.assertFalse(absent.answered)
+        org.junit.Assert.assertTrue((perHeader["7E7"] ?: 0) <= 2) // 19 02 FF + 18 02 FF 00 only
+        org.junit.Assert.assertTrue(rep.modules!!.first { it.module.tx == "7D1" }.answered)
+        org.junit.Assert.assertEquals(listOf("7E0", "7E1", "784", "7D1", "7B6", "7B5", "743", "773", "600"),
+            com.chuikoff.obd.diag.DtcDecode.QUICK_OUTLANDER.map { it.tx })
+    }
+
     @org.junit.Test fun discoverParse() {
         org.junit.Assert.assertEquals(listOf("7A8"), com.chuikoff.obd.diag.DiscoverParse.responders("7A8 02 7E 00 AA AA AA AA AA\r\r>", "7A0"))
         org.junit.Assert.assertEquals(emptyList<String>(), com.chuikoff.obd.diag.DiscoverParse.responders("NO DATA\r\r>", "7A0"))

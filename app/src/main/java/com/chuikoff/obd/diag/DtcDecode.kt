@@ -40,6 +40,31 @@ object DtcDecode {
         ids.map { tx -> DiagModule(KNOWN[tx] ?: "Блок $tx", tx, "%03X".format(tx.toInt(16) + 8)) }
     }
 
+    /** Quick check, Hyundai Creta GS: proven addresses first (7E0/7E1/7D1/7A0 answered on the car). */
+    val QUICK_CRETA: List<DiagModule> = listOf(
+        DiagModule("Двигатель (ECM)", "7E0", "7E8"),
+        DiagModule("АКПП A6GF1 (TCM)", "7E1", "7E9"),
+        DiagModule("ABS / ESC", "7D1", "7D9"),
+        DiagModule("ABS / ESC #2 (EPB)", "7D5", "7DD"),
+        DiagModule("Полный привод 4WD", "7E7", "7EF"),
+        DiagModule("Полный привод 4WD #2", "740", "748"),
+        DiagModule("TPMS (кузов BCM)", "7A0", "7A8"),
+        DiagModule("TPMS (отдельный блок)", "7D6", "7DE")
+    )
+
+    /** Quick check, Mitsubishi Outlander GF/GG (OBDb Mitsubishi-Outlander addressing, rx ≠ tx+8). */
+    val QUICK_OUTLANDER: List<DiagModule> = listOf(
+        DiagModule("Двигатель (ECM)", "7E0", "7E8"),
+        DiagModule("CVT (TCM)", "7E1", "7E9"),
+        DiagModule("ABS / ASC", "784", "785"),
+        DiagModule("ABS / ASC #2", "7D1", "7D9"),
+        DiagModule("AWC / 4WD", "7B6", "7B7"),
+        DiagModule("AWC / 4WD #2", "7B5", "7BD"),
+        DiagModule("TPMS", "743", "763"),
+        DiagModule("TPMS #2", "773", "774"),
+        DiagModule("TPMS #3 (ETACS)", "600", "500")
+    )
+
     fun ecuName(id: String?): String = when (id?.uppercase()) {
         null -> "ЭБУ (адрес неизвестен)"
         "7E8" -> "Двигатель (7E8)"

@@ -39,13 +39,35 @@ class DtcScanner(
         runCatching { tx(cmd, module, timeoutMs = 1500) }.onFailure { if (it is CancellationException) throw it }
     }
 
-    suspend fun quick(): DtcReport = client.probing {
-        try {
+    /**
+     * Quick = OBD-II (7DF 01/03/07/0A) + the profile's key modules ([DtcDecode.QUICK_CRETA] /
+     * [DtcDecode.QUICK_OUTLANDER]): engine, gearbox, ABS 1/2, 4WD 1/2, TPMS. An absent module costs
+     * two short NO DATA (~0.5 s), never an adapter reset.
+     */
+    suspend fun quick(modules: List<DiagModule> = emptyList(), onProgress: (String) -> Unit = {}): DtcReport = client.probing {
+        val q = try {
             quickOnce(headers = true).takeIf { it.obdAnswered }
                 ?: quickOnce(headers = false) // some clones misbehave with ATH1 — retry like 1.14.0
         } finally {
             restore()
         }
+        if (modules.isEmpty()) return@probing q
+        physicalObd.clear()
+        val results = mutableListOf<ModuleResult>()
+        try {
+            modules.forEachIndexed { i, m ->
+                onProgress("${m.name} ${m.tx} (${i + 1}/${modules.size})")
+                val r = scanModule(m)
+                results += r
+                log(DtcLogLine(System.currentTimeMillis(), "${m.name} ${m.tx}", "== ИТОГ",
+                    if (!r.answered) "нет ответа / нет блока" else "ответил: ${r.protocol ?: "без кодов"}, кодов ${r.codes.size}" +
+                        (if (r.ignored > 0) ", неактивных ${r.ignored}" else "") + (r.note?.let { " ($it)" } ?: "")))
+            }
+        } finally {
+            restore()
+        }
+        val merged = (physicalObd + q.obdCodes).sortedBy { if (it.ecuId == null) 1 else 0 }.distinctBy { it.code to it.kind }
+        q.copy(timestampMs = System.currentTimeMillis(), modules = results, obdCodes = merged)
     }
 
     private suspend fun quickOnce(headers: Boolean): DtcReport {
@@ -89,7 +111,7 @@ class DtcScanner(
             .distinctBy { it.code to it.kind }
         onProgress("давление в шинах (TPMS)")
         val tpms = client.probing { try { Tpms.probe(client) { l -> log(l) } } finally { restore() } }
-        return q.copy(timestampMs = System.currentTimeMillis(), modules = results, obdCodes = merged, tpms = tpms)
+        return q.copy(timestampMs = System.currentTimeMillis(), modules = results, obdCodes = merged, tpms = tpms, full = true)
     }
 
     private val physicalObd = mutableListOf<DtcEntry>()
@@ -105,7 +127,7 @@ class DtcScanner(
 
     companion object {
         /** Body/TPMS modules: also ask KWP when UDS listed nothing. */
-        val KWP_TOO = setOf("7A0", "7A5", "7D6", "770", "771", "7C6")
+        val KWP_TOO = setOf("7A0", "7A5", "7D6", "770", "771", "7C6", "784", "7B6", "743", "773", "600")
     }
 
     /**
@@ -181,7 +203,7 @@ class DtcScanner(
         fun rejected(r: DtcDecode.Reply) = r is DtcDecode.Reply.Negative || r == DtcDecode.Reply.Junk || r == DtcDecode.Reply.Pending
 
         // Engine/TCM also answer OBD modes physically
-        if (m.tx.startsWith("7E")) {
+        if (m.tx == "7E0" || m.tx == "7E1") {
             for ((req, kind) in listOf("03" to DtcKind.STORED, "07" to DtcKind.PENDING, "0A" to DtcKind.PERMANENT)) {
                 val raw = safeTx(req, tag)
                 if (Elm327Parser.assemble(raw).isNotEmpty()) answered = true

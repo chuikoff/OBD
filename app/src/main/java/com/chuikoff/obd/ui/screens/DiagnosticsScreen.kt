@@ -89,7 +89,7 @@ fun DiagnosticsScreen(
         if (report != null) {
             item {
                 Text("Прочитано: " + java.text.SimpleDateFormat("dd.MM HH:mm:ss", java.util.Locale.US).format(java.util.Date(report.timestampMs)) +
-                    (if (report.modules != null) " · полная проверка" else " · быстрая проверка") +
+                    (if (report.full) " · полная проверка" else " · быстрая проверка") +
                     (if (state.dtcClear != null) " · после сброса" else ""),
                     style = MaterialTheme.typography.bodySmall)
             }
@@ -114,9 +114,9 @@ fun DiagnosticsScreen(
                     items(codes) { DtcCard(it) }
                 }
             }
-            if (report.modules != null) item { TpmsCard(report.tpms) }
+            if (report.full) item { TpmsCard(report.tpms) }
             report.modules?.let { mods ->
-                item { Text("Блоки (полная проверка)", style = MaterialTheme.typography.titleMedium) }
+                item { Text(if (report.full) "Блоки (полная проверка)" else "Блоки (быстрая проверка)", style = MaterialTheme.typography.titleMedium) }
                 items(mods) { ModuleRow(it) }
             }
         } else if (!state.dtcBusy) {
@@ -250,7 +250,7 @@ private fun DtcCard(e: DtcEntry) {
 @Composable
 private fun ModuleRow(m: ModuleResult) {
     val text = when {
-        !m.answered -> "не ответил"
+        !m.answered -> "нет ответа / нет блока"
         m.codes.isNotEmpty() -> "ОШИБОК: ${m.codes.size}"
         m.protocol != null -> "ошибок нет" + if (m.ignored > 0) " (неактивных в памяти: ${m.ignored})" else ""
         else -> "ответил, коды не прочитаны"

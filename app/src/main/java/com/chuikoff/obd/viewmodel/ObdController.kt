@@ -604,7 +604,7 @@ class ObdController private constructor(private val app: Application) {
         val log = mutableListOf<com.chuikoff.obd.diag.DtcLogLine>()
         _ui.update {
             it.copy(dtcBusy = true, dtcError = null, dtcLog = emptyList(), dtcClear = null,
-                dtcStatus = if (full) "Полная проверка: опрос всех блоков (~1 мин)…" else "Чтение ошибок OBD…")
+                dtcStatus = if (full) "Полная проверка: опрос всех блоков (~1 мин)…" else "Быстрая проверка: OBD-II, двигатель, коробка, ABS, 4WD, TPMS…")
         }
         scope.launch {
             try {
@@ -614,7 +614,7 @@ class ObdController private constructor(private val app: Application) {
                         _ui.update { it.copy(dtcLog = log.toList()) }
                     }
                     val report = if (full) scanner.full { p -> _ui.update { it.copy(dtcStatus = "Полная проверка: $p…") } }
-                    else scanner.quick()
+                    else scanner.quick(quickModules()) { p -> _ui.update { it.copy(dtcStatus = "Быстрая проверка: $p…") } }
                     _ui.update {
                         it.copy(dtcReport = report, dtcScanned = true, dtcStatus = report.summaryRu(), dtcError = null,
                             dtcLog = log.toList())
@@ -629,6 +629,11 @@ class ObdController private constructor(private val app: Application) {
             }
         }
     }
+
+    /** Key modules for «Быстрая проверка» of the selected car. */
+    private fun quickModules(): List<com.chuikoff.obd.diag.DiagModule> =
+        if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) com.chuikoff.obd.diag.DtcDecode.QUICK_OUTLANDER
+        else com.chuikoff.obd.diag.DtcDecode.QUICK_CRETA
 
     fun dtcExportText(): String = dtcExportText(includeRaw = true)
 
@@ -653,7 +658,7 @@ class ObdController private constructor(private val app: Application) {
                     append("Неактивные / история (${inactive.size}):\n")
                     inactive.forEach { c -> append("  ${c.code} — ${c.ecuName}${c.statusRu?.let { " — $it" } ?: ""}\n") }
                 }
-                if (r.modules != null) {
+                if (r.full) {
                     append("TPMS: ").append(if (r.tpms.isEmpty()) "нет данных" else "").append("\n")
                     r.tpms.forEach { t ->
                         append("  ${t.sourceRu}: ${t.wheels.joinToString("; ") { it.text() }}${t.noteRu?.let { " $it" } ?: ""} RAW ${t.raw}\n")

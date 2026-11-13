@@ -207,6 +207,7 @@ private fun DtcCard(e: DtcEntry) {
     ) {
         Column(Modifier.padding(12.dp)) {
             Text(e.code, style = MaterialTheme.typography.titleLarge)
+            com.chuikoff.obd.diag.DtcText.ru(e.code)?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
             Text(e.kind.titleRu + (e.statusRu?.let { " · $it" } ?: ""), style = MaterialTheme.typography.bodySmall)
         }
     }

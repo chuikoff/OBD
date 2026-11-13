@@ -175,6 +175,44 @@ class DtcScanTest {
     }
 }
 
+class CretaTpmsDtcTest {
+    @org.junit.Test fun bcmEmptyFfMaskRetriedWithOwnMask() = kotlinx.coroutines.runBlocking {
+        var header = "7E0"
+        var headersOn = false
+        val t = ScriptedElm { c ->
+            when {
+                c == "ATZ" -> "\r\rELM327 v1.5\r\r>"
+                c == "ATH1" -> { headersOn = true; "OK\r\r>" }
+                c == "ATH0" -> { headersOn = false; "OK\r\r>" }
+                c.startsWith("ATSH") -> { header = c.removePrefix("ATSH"); "OK\r\r>" }
+                c.startsWith("AT") -> "OK\r\r>"
+                header == "7A0" && c == "3E00" && headersOn -> "7A8027E00AAAAAAAAAA\r\r>"
+                header == "7A0" && c == "1902FF" -> "590209\r\r>"
+                header == "7A0" && c == "190209" -> "00F\r0:59020953130089\r1:56620009566300\r2:09AAAAAAAAAAAA\r\r>"
+                else -> "NO DATA\r\r>"
+            }
+        }
+        val c = com.chuikoff.obd.elm327.Elm327Client(t); c.ensureInitialized()
+        val log = mutableListOf<com.chuikoff.obd.diag.DtcLogLine>()
+        val rep = com.chuikoff.obd.diag.DtcScanner(c) { log += it }.full()
+        org.junit.Assert.assertEquals(listOf("C1313", "C1662", "C1663"), rep.allCodes.map { it.code })
+        org.junit.Assert.assertTrue(com.chuikoff.obd.diag.DtcText.ru("C1313")!!.contains("переднего правого"))
+        org.junit.Assert.assertTrue(log.any { it.request == "== ОТВЕТИЛИ" && it.rawVisible.contains("7A0→7A8") })
+    }
+
+    @org.junit.Test fun discoverParse() {
+        org.junit.Assert.assertEquals(listOf("7A8"), com.chuikoff.obd.diag.DiscoverParse.responders("7A8 02 7E 00 AA AA AA AA AA\r\r>", "7A0"))
+        org.junit.Assert.assertEquals(emptyList<String>(), com.chuikoff.obd.diag.DiscoverParse.responders("NO DATA\r\r>", "7A0"))
+    }
+
+    @org.junit.Test fun realCretaC00bMeansNoSensorSignal() {
+        val raw = "020\r0:62C00BFFFFFF\r1:80FFFF0002FFFF\r2:0002FFFF0002FF\r3:FF0002358B9C8B\r4:9C8B9C8B9CAAAA\r\r>"
+        val r = com.chuikoff.obd.diag.Tpms.parseBcm(raw)!!
+        org.junit.Assert.assertTrue(r.wheels.all { it.noSignal && it.bar == null })
+        org.junit.Assert.assertTrue(r.noteRu!!.contains("ни от одного"))
+    }
+}
+
 class TpmsTest {
     @org.junit.Test fun bcmRioLayout() {
         // 62 C0 0B + 4 header bytes + FL(press,temp,x,x) FR RR RL ; 0xA0=160 → 32 psi ≈ 2.21 bar, temp 0x3C → 10 °C

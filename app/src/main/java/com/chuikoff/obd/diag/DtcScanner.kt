@@ -67,7 +67,11 @@ class DtcScanner(
         val results = mutableListOf<ModuleResult>()
         client.probing {
             try {
-                val mods = DtcDecode.HYUNDAI_MODULES
+                val found = runCatching { discover(onProgress) }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyMap())
+                val known = DtcDecode.HYUNDAI_MODULES.map { k -> found[k.tx]?.let { rx -> k.copy(rx = rx) } ?: k }
+                val extra = found.filterKeys { t -> known.none { it.tx == t } }
+                    .map { (t, rx) -> DiagModule("Блок $t (найден поиском)", t, rx) }
+                val mods = known + extra
                 mods.forEachIndexed { i, m ->
                     onProgress("${m.name} ${m.tx} (${i + 1}/${mods.size})")
                     val r = scanModule(m)
@@ -89,15 +93,72 @@ class DtcScanner(
     }
 
     private val physicalObd = mutableListOf<DtcEntry>()
+    private var lastAvail: Int? = null
+
+    private fun merge(a: DtcDecode.Reply.Codes, b: DtcDecode.Reply.Codes, how: String, notes: MutableList<String>): DtcDecode.Reply.Codes {
+        val newCodes = b.codes.filter { c -> a.codes.none { it.code == c.code } }
+        if (newCodes.isNotEmpty()) notes += "коды нашлись только через $how"
+        val codes = a.codes + newCodes
+        val inactive = (a.inactive + b.inactive).distinctBy { it.code }.filter { i -> codes.none { it.code == i.code } }
+        return DtcDecode.Reply.Codes(codes, inactive.size, inactive)
+    }
+
+    companion object {
+        /** Body/TPMS modules: also ask KWP when UDS listed nothing. */
+        val KWP_TOO = setOf("7A0", "7A5", "7D6", "770", "771", "7C6")
+    }
+
+    /**
+     * Bus discovery: tester present (3E 00) to every 11-bit 7x0…7x7 id, receive filter 7XX, headers on.
+     * Returns request id → response id for everyone who answered anything.
+     */
+    suspend fun discover(onProgress: (String) -> Unit = {}): Map<String, String> {
+        val found = linkedMapOf<String, String>()
+        at("ATH1", "поиск"); at("ATCAF1", "поиск"); at("ATFCSM0", "поиск"); at("ATST19", "поиск")
+        val wildcard = runCatching { tx("ATCRA7XX", "поиск", 1500) }.getOrDefault("").contains("OK")
+        try {
+            for (base in 0x700..0x7F0 step 0x10) {
+                onProgress("поиск блоков %03X…".format(base))
+                for (i in 0..7) {
+                    val t = "%03X".format(base + i)
+                    if (t == "7DF") continue
+                    at("ATSH$t", "поиск")
+                    if (!wildcard) at("ATCRA%03X".format(base + i + 8), "поиск")
+                    val raw = safeTxQuiet("3E00")
+                    val ids = DiscoverParse.responders(raw, t)
+                    if (ids.isNotEmpty()) {
+                        found[t] = ids.first()
+                        log(DtcLogLine(System.currentTimeMillis(), "поиск", "$t 3E00", Elm327Parser.visibleRaw(raw)))
+                    }
+                }
+            }
+        } finally {
+            at("ATST32", "поиск"); at("ATAR", "поиск")
+        }
+        log(DtcLogLine(System.currentTimeMillis(), "поиск", "== ОТВЕТИЛИ",
+            if (found.isEmpty()) "никто" else found.entries.joinToString(", ") { "${it.key}→${it.value}" }))
+        return found
+    }
+
+    private suspend fun safeTxQuiet(cmd: String): String = try {
+        client.send(cmd, timeoutMs = 1200)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        ""
+    }
 
     private suspend fun scanModule(m: DiagModule): ModuleResult {
         val tag = "${m.name} ${m.tx}"
         Elm327Client.ecuAddressing(m.tx, m.rx).forEach { at(it, tag) }
+        lastAvail = null
         var answered = false
         val notes = mutableListOf<String>()
 
         suspend fun uds(req: String): DtcDecode.Reply {
-            var x = DtcDecode.parseUds1902(safeTx(req, tag), m)
+            val first = safeTx(req, tag)
+            DtcDecode.udsAvailabilityMask(first)?.let { lastAvail = it }
+            var x = DtcDecode.parseUds1902(first, m)
             // 78 = response pending, 21 = busy, repeat request (seen on the Creta MDPS 7D4)
             for (attempt in 1..3) {
                 val retry = x == DtcDecode.Reply.Pending || (x as? DtcDecode.Reply.Negative)?.nrc == 0x21
@@ -142,7 +203,37 @@ class DtcScanner(
             r = uds("1902FF")
             if (rejected(r)) r = uds("190209")
         }
-        if (r is DtcDecode.Reply.Codes) return ModuleResult(m, true, "UDS 19 02", r.codes, r.ignored, notes.joinToString("; ").ifEmpty { null }, r.inactive)
+        if (r is DtcDecode.Reply.Codes) {
+            // 1.14.5: the Creta BCM/TPMS (7A0) answered «59 02 09» with no records to 19 02 FF while
+            // Car Scanner showed C1313/C1662/C1663. Some ECUs match the mask exactly or only in the
+            // extended session → when empty, ask again with the ECU's own mask, 0A (all), 10 03.
+            var acc: DtcDecode.Reply.Codes = r
+            if (acc.codes.isEmpty()) {
+                val avail = lastAvail
+                val extra = linkedSetOf<String>()
+                if (avail != null && avail != 0xFF && avail != 0) extra += "1902%02X".format(avail)
+                extra += listOf("190209", "190208", "190201", "190A")
+                for (req in extra) {
+                    val x = uds(req)
+                    if (x is DtcDecode.Reply.Codes) acc = merge(acc, x, req, notes)
+                }
+                if (acc.codes.isEmpty()) {
+                    safeTx("1003", tag)
+                    for (req in listOf("1902FF", "190209")) {
+                        val x = uds(req)
+                        if (x is DtcDecode.Reply.Codes) acc = merge(acc, x, "10 03 + $req", notes)
+                    }
+                    safeTx("1001", tag)
+                }
+                if (acc.codes.isEmpty() && m.tx in KWP_TOO) {
+                    for ((req, sid) in listOf("1802FF00" to 0x18, "1800FF00" to 0x18, "17FF00" to 0x17)) {
+                        val k = kwp(req, sid)
+                        if (k is DtcDecode.Reply.Codes && k.codes.isNotEmpty()) { acc = merge(acc, k, "KWP $req", notes); break }
+                    }
+                }
+            }
+            return ModuleResult(m, true, "UDS 19 02", acc.codes, acc.ignored, notes.joinToString("; ").ifEmpty { null }, acc.inactive)
+        }
         if (r is DtcDecode.Reply.Negative) notes += "UDS: ${DtcDecode.nrcRu(r.nrc)}"
         if (r != DtcDecode.Reply.None) answered = true
 

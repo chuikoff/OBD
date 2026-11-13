@@ -633,7 +633,7 @@ class ObdController private constructor(private val app: Application) {
                 append(r.summaryRu()).append("\n")
                 r.mil.forEach { append("MIL ${it.ecuId ?: "?"}: ${if (it.milOn) "ГОРИТ" else "нет"}, кодов ${it.dtcCount}\n") }
                 r.allCodes.forEach { c ->
-                    append("${c.code} — ${c.ecuName} — ${c.kind.titleRu}${c.statusRu?.let { " — $it" } ?: ""}\n")
+                    append("${c.code}${com.chuikoff.obd.diag.DtcText.ru(c.code)?.let { " ($it)" } ?: ""} — ${c.ecuName} — ${c.kind.titleRu}${c.statusRu?.let { " — $it" } ?: ""}\n")
                 }
                 val inactive = r.inactiveCodes
                 if (inactive.isNotEmpty()) {

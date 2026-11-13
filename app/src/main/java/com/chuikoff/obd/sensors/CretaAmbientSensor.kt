@@ -6,15 +6,16 @@ import kotlinx.coroutines.CancellationException
 
 /**
  * Creta outside temperature. The engine ECU's SAE 0146 read +6 °C while the cluster showed +4 °C
- * (13.11.2026), so the cluster does not use it. EXPERIMENTAL source tried first, once per connection:
- * climate unit 7B3, UDS 22 0100, byte 6, X/2 − 40 (OBDb Hyundai Kona / Kia Seltos «TEMP_EXT»).
+ * (13.11.2026), so the cluster does not use it. Climate unit 7B3 is KWP on the Creta (22 xx → 7F 22 11):
+ * 21 01 → 61 01 7E 10 00 68 FF 84 58 57 …, byte 6 after «61 01» = 0x58 → X/2 − 40 = 4.0 °C = dashboard
+ * (two dumps, 0x58 both; same position as OBDb Kona/Seltos «TEMP_EXT» in 22 0100).
  * Accepted only if plausible next to 0146 (−12…+4 °C of it); otherwise 0146 stays the source.
  * Both go through the dashboard-like display filter in the controller.
  */
 object CretaAmbient {
     const val TX = "7B3"
     const val RX = "7BB"
-    const val REQUEST = "220100"
+    const val REQUEST = "2101"
     const val INDEX = 6
 
     @Volatile var probed = false
@@ -22,15 +23,19 @@ object CretaAmbient {
     @Volatile var useClimate = false
         private set
 
-    fun reset() { probed = false; useClimate = false }
+    @Volatile internal var lastClimate: Double? = null
+    @Volatile internal var lastClimateMs = 0L
+    const val CLIMATE_EVERY_MS = 5_000L
+
+    fun reset() { probed = false; useClimate = false; lastClimate = null; lastClimateMs = 0L }
 
     fun decodeClimate(raw: String): Double? {
         val m = Elm327Parser.assemble(raw).firstOrNull {
-            it.bytes.size > 3 + INDEX && Elm327Parser.toUnsigned(it.bytes[0]) == 0x62 &&
-                Elm327Parser.toUnsigned(it.bytes[1]) == 0x01 && Elm327Parser.toUnsigned(it.bytes[2]) == 0x00
+            it.bytes.size > 2 + INDEX && Elm327Parser.toUnsigned(it.bytes[0]) == 0x61 &&
+                Elm327Parser.toUnsigned(it.bytes[1]) == 0x01
         } ?: return null
         if (!m.positionsTrustworthy) return null
-        val x = Elm327Parser.toUnsigned(m.bytes[3 + INDEX])
+        val x = Elm327Parser.toUnsigned(m.bytes[2 + INDEX])
         if (x == 0xFF || x == 0x00) return null
         return (x / 2.0 - 40.0).takeIf { it in -40.0..60.0 }
     }
@@ -44,7 +49,7 @@ class CretaAmbientSensor : SensorDefinition {
     override val id = "ambient_temp"
     override val displayNameRu = "Температура снаружи"
     override val unit = "°C"
-    override val caveatRu = "Климат 7B3 22 0100 (эксп.) или ЭБУ 0146; фильтр как у приборки"
+    override val caveatRu = "Климат 7B3 21 01 (датчик приборки) или ЭБУ 0146; фильтр как у приборки"
 
     override suspend fun read(client: Elm327Client): SensorReading = client.probing {
         val ecuRaw = try {
@@ -56,11 +61,15 @@ class CretaAmbientSensor : SensorDefinition {
 
         var climate: Double? = null
         var climateRaw: String? = null
-        if (!CretaAmbient.probed || CretaAmbient.useClimate) {
+        val now = System.currentTimeMillis()
+        val cached = CretaAmbient.lastClimate?.takeIf { CretaAmbient.useClimate && now - CretaAmbient.lastClimateMs < CretaAmbient.CLIMATE_EVERY_MS }
+        if (cached != null) climate = cached
+        else if (!CretaAmbient.probed || CretaAmbient.useClimate) {
             try {
                 Elm327Client.ecuAddressing(CretaAmbient.TX, CretaAmbient.RX).forEach { runCatching { client.send(it, timeoutMs = 1500) } }
                 climateRaw = client.send(CretaAmbient.REQUEST, timeoutMs = 2500)
                 climate = CretaAmbient.decodeClimate(climateRaw)?.takeIf { CretaAmbient.plausible(it, ecu) }
+                if (climate != null) { CretaAmbient.lastClimate = climate; CretaAmbient.lastClimateMs = now }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -69,7 +78,7 @@ class CretaAmbientSensor : SensorDefinition {
             }
             if (!CretaAmbient.probed) {
                 CretaAmbient.mark(climate != null)
-                CvtDebugLog.add(CvtDebugEntry(System.currentTimeMillis(), "Снаружи 7B3 220100",
+                CvtDebugLog.add(CvtDebugEntry(System.currentTimeMillis(), "Снаружи 7B3 2101",
                     Elm327Parser.visibleRaw(climateRaw ?: ""), "проба климата", null,
                     "климат=${climate ?: "—"} · ЭБУ 0146=${ecu ?: "—"}", climate, if (climate == null) "климат не дал значения" else null))
             }
@@ -79,7 +88,7 @@ class CretaAmbientSensor : SensorDefinition {
             sensorId = id, displayName = displayNameRu, value = value, unit = unit,
             rawHex = listOfNotNull(climateRaw?.let { Elm327Parser.clean(it) }, Elm327Parser.clean(ecuRaw)).joinToString(" | "),
             rawValue = value,
-            note = if (climate != null) "Климат 7B3 22 0100 (эксп.) · ЭБУ 0146: ${ecu?.let { "%.0f °C".format(it) } ?: "—"}"
+            note = if (climate != null) "Климат 7B3 21 01 (как приборка) · ЭБУ 0146: ${ecu?.let { "%.0f °C".format(it) } ?: "—"}"
             else "ЭБУ SAE 0146 (приборка может показывать на 1–2° ниже)",
             error = if (value == null) "Нет данных (0146 и климат 7B3)" else null
         )

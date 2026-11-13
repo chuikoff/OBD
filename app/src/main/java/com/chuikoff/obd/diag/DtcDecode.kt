@@ -16,7 +16,7 @@ object DtcDecode {
         "7D4" to "Электроусилитель руля (MDPS)",
         "7C6" to "Приборная панель",
         "7C4" to "Парктроник / камера",
-        "7A0" to "Кузов (BCM) / Smart key",
+        "7A0" to "Кузов (BCM) / TPMS",
         "770" to "Кузов / IPS",
         "7B3" to "Климат",
         "7D6" to "Датчики давления шин (TPMS)",
@@ -101,10 +101,16 @@ object DtcDecode {
         object Junk : Reply()
     }
 
-    /** UDS 59 02 [mask] (DTC hi mid ftb status)* — or 7F 19 NRC. */
+    /** Availability mask from «59 02 MM …» (null if not a positive 19 02 reply). */
+    fun udsAvailabilityMask(raw: String): Int? =
+        Elm327Parser.assemble(raw).firstOrNull {
+            it.bytes.size >= 3 && toUnsigned(it.bytes[0]) == 0x59 && toUnsigned(it.bytes[1]) in setOf(0x02, 0x0A)
+        }?.let { toUnsigned(it.bytes[2]) }
+
+    /** UDS 59 02 [mask] (DTC hi mid ftb status)* — or 7F 19 NRC. Also 59 0A (all supported DTCs). */
     fun parseUds1902(raw: String, module: DiagModule): Reply {
         val msgs = Elm327Parser.assemble(raw).filter { it.bytes.isNotEmpty() }
-        msgs.firstOrNull { it.bytes.size >= 2 && toUnsigned(it.bytes[0]) == 0x59 && toUnsigned(it.bytes[1]) == 0x02 }?.let { m ->
+        msgs.firstOrNull { it.bytes.size >= 2 && toUnsigned(it.bytes[0]) == 0x59 && toUnsigned(it.bytes[1]) in setOf(0x02, 0x0A) }?.let { m ->
             val body = m.bytes.drop(3) // skip 59 02 availabilityMask
             var ignored = 0
             val inactive = mutableListOf<DtcEntry>()

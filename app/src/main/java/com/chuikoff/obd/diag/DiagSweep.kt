@@ -91,7 +91,7 @@ class DiagSweep(private val client: Elm327Client, private val onProgress: (Strin
             val plan = listOf(
                 Triple("7B3", "7BB", listOf("220100", "220101", "220102", "2101", "2102", "2103", "2180")),
                 Triple("7C6", "7CE", listOf("22B001", "22B002", "22B003", "22B004", "22B005", "22B006", "2101", "2102")),
-                Triple("7A0", "7A8", listOf("22C00B", "22C001", "22C002", "22B001", "22B002", "22B003", "22B004", "2101", "2106")),
+                Triple("7A0", "7A8", listOf("1902FF", "190209", "190208", "190A", "22C00B", "22C001", "22C002", "22B001", "22B002", "22B003", "22B004", "1802FF00", "18020000")),
                 Triple("7D6", "7DE", listOf("2106", "2101", "22C00B")),
                 Triple("7D1", "7D9", listOf("22C104", "22C101"))
             )

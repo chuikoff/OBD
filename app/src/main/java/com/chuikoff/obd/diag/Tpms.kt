@@ -16,8 +16,8 @@ import java.util.Locale
  *  - Indirect (ABS wheel-speed based, Rio 4 platform): 22 C104 @7D1 → last deflation detection odometer.
  */
 object Tpms {
-    data class Wheel(val pos: String, val bar: Double?, val tempC: Int?, val warn: Boolean? = null) {
-        fun text(): String = "$pos: " + (bar?.let { String.format(Locale.US, "%.2f бар", it) } ?: "—") +
+    data class Wheel(val pos: String, val bar: Double?, val tempC: Int?, val warn: Boolean? = null, val noSignal: Boolean = false) {
+        fun text(): String = "$pos: " + (bar?.let { String.format(Locale.US, "%.2f бар", it) } ?: if (noSignal) "нет сигнала датчика" else "—") +
             (tempC?.let { ", $it °C" } ?: "") + if (warn == true) " ⚠" else ""
     }
 
@@ -37,19 +37,26 @@ object Tpms {
     private fun psiBar(x: Int?): Double? = x?.takeIf { it in 1..254 }?.let { it / 5.0 * PSI_TO_BAR }
     private fun temp(x: Int?): Int? = x?.takeIf { it in 1..254 }?.let { it - 50 }
 
-    /** 7A0 22 C00B. */
+    /**
+     * 7A0 22 C00B. Creta GS (13.11.2026, lamp on, C1313/C1662/C1663 in Car Scanner):
+     * 62 C0 0B | FF FF FF 80 | FF FF 00 02 ×4 | 35 8B 9C 8B 9C 8B 9C 8B 9C →
+     * 4 header bytes, then 4 bytes per wheel (pressure, temperature, ?, flags) FL FR RR RL (Rio 4 layout);
+     * FF = nothing received from that sensor.
+     */
     fun parseBcm(raw: String): Result? {
         val p = payload(raw, 0x62, 0xC0, 0x0B) ?: return null
-        val wheels = if (p.size >= 24) {
-            listOf("ПЛ" to 4, "ПП" to 9, "ЗЛ" to 14, "ЗП" to 19).map { (n, o) ->
-                Wheel(n, psiBar(u(p, o)), temp(u(p, o + 1)))
-            }
-        } else if (p.size >= 20) {
-            listOf("ПЛ" to 4, "ПП" to 8, "ЗП" to 12, "ЗЛ" to 16).map { (n, o) ->
-                Wheel(n, psiBar(u(p, o)), temp(u(p, o + 1)))
-            }
-        } else return Result("Кузов/BCM 7A0 (22 C00B)", emptyList(), "ответ ${p.size} байт — раскладка неизвестна", Elm327Parser.clean(raw))
-        return Result("Кузов/BCM 7A0 (22 C00B)", wheels, null, Elm327Parser.clean(raw))
+        if (p.size < 20) return Result("Кузов/BCM 7A0 (22 C00B)", emptyList(), "ответ ${p.size} байт — раскладка неизвестна", Elm327Parser.clean(raw))
+        val wheels = listOf("ПЛ" to 4, "ПП" to 8, "ЗП" to 12, "ЗЛ" to 16).map { (n, o) ->
+            val pr = u(p, o)
+            Wheel(n, psiBar(pr), temp(u(p, o + 1)), noSignal = pr == 0xFF)
+        }
+        val silent = wheels.count { it.noSignal }
+        val note = when {
+            silent == 4 -> "Блок не получает сигнал ни от одного датчика в колёсах: датчиков нет (колёса без датчиков, напр. зимний комплект), сели батарейки или датчики не прописаны."
+            silent > 0 -> "Нет сигнала от $silent датчик(ов)."
+            else -> null
+        }
+        return Result("Кузов/BCM 7A0 (22 C00B)", wheels, note, Elm327Parser.clean(raw))
     }
 
     /** 7D6 21 06. */
@@ -105,7 +112,9 @@ object Tpms {
     }
 
     const val HINT_RU =
-        "Лампа давления в шинах горит постоянно → низкое давление (это предупреждение, кода ошибки нет): " +
+        "Коды C1312–C1315 (нет сигнала датчика), C1662/C1663 (сбой обучения/определения колёс) — блок не слышит датчики: " +
+            "стоят колёса без датчиков (часто зимний комплект), сел датчик или новые датчики не прописаны — прописать в сервисе/TPMS-программатором. " +
+            "Лампа давления в шинах горит постоянно → низкое давление (это предупреждение, кода ошибки нет): " +
             "проверьте давление во всех шинах на холодную и подкачайте до нормы с таблички на стойке водителя, " +
             "проехать 10–20 мин — лампа погаснет. Мигает ~1 мин после включения зажигания, затем горит → " +
             "неисправность системы (датчик/батарейка), тогда должен быть код в блоке кузова/TPMS."

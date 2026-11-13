@@ -166,7 +166,8 @@ fun ObdApp(vm: ObdController, onEnsurePermissions: () -> Unit = {}) {
                     onClearCvtLog = vm::clearCvtLog,
                     cvtExport = vm::cvtLogExportText,
                     onSaveDiag = vm::saveDiagnostics,
-                    onShareDiag = vm::shareDiagnostics
+                    onShareDiag = vm::shareDiagnostics,
+                    onResetFuelTrip = vm::resetFuelTrip
                 )
                 2 -> DiagnosticsScreen(
                     state = state,

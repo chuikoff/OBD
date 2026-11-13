@@ -261,6 +261,9 @@ class ObdController private constructor(private val app: Application) {
 
     fun clearCvtLog() = CvtDebugLog.clear()
 
+    /** «Сбросить» for the trip average fuel consumption (also reset on every new connection). */
+    fun resetFuelTrip() = engineExtras.trip.reset()
+
     /** Plain-text export of the last ~50 CVT responses + context (coolant/ambient now). */
     fun cvtLogExportText(): String {
         val s = _ui.value
@@ -483,6 +486,8 @@ class ObdController private constructor(private val app: Application) {
                 elm!!.ensureInitialized()
                 engineExtras.reset(readSupportedPids(elm!!))
                 autoSelectProfileByVin(elm!!)
+                // only used without MAF (MAP estimate): Creta 1.6 MPI = 1.591 л
+                engineExtras.displacementL = if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) 2.0 else 1.591
                 val last = LastAdapter(device.address, device.name, usedType)
                 saveLastAdapter(last)
                 alertEngine.resetTrip()

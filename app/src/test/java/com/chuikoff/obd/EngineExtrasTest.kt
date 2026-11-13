@@ -89,7 +89,8 @@ class EngineExtrasTest {
         assertEquals("14.2 В", v.displayText)
         assertEquals(VoltageScale.GREEN, v.valueArgb)
         val f = byId.getValue(EngineExtras.ID_FUEL).read(c)
-        assertEquals("5.5 л/100км", f.displayText) // MAF 10 g/s at 60 km/h
+        assertEquals("копится…", f.displayText) // trip average needs 1 km first
+        assertTrue(f.statusLine!!.contains("сейчас 5.5 л/100км")) // MAF 10 g/s at 60 km/h
         // engine load (0104) is never polled, even when supported
         assertTrue("engine_load" !in x.sensors().map { it.id })
         // a PID that answers NO DATA → hidden after 3 tries
@@ -106,7 +107,7 @@ class EngineExtrasTest {
         x.reset(setOf(0x0C, 0x0D, 0x10)) // no 0142 → ATRV
         val c = elm(mapOf("0110" to "411000FA\r\r>", "010D" to "410D00\r\r>", "010C" to "410C0000\r\r>", "ATRV" to "12.1V\r\r>"))
         val byId = x.sensors().associateBy { it.id }
-        assertEquals("0.8 л/ч", byId.getValue(EngineExtras.ID_FUEL).read(c).displayText)
+        assertTrue(byId.getValue(EngineExtras.ID_FUEL).read(c).statusLine!!.contains("сейчас 0.8 л/ч"))
         byId.getValue(EngineExtras.ID_RPM).read(c) // 0 rpm → engine off
         val v = byId.getValue(EngineExtras.ID_VOLTAGE).read(c)
         assertEquals("12.1 В", v.displayText)
@@ -136,5 +137,54 @@ class EngineExtrasTest {
         val seq = (2..24 step 2).map { Poller.extraForTick(extras, it, true)!!.id }
         assertEquals(listOf("rpm", "voltage", "rpm", "fuel_rate", "rpm", "voltage"), seq.take(6))
         assertNull(Poller.extraForTick(emptyList(), 2, true))
+    }
+
+    @Test fun fuelTripThresholdAndAverage() {
+        val t = com.chuikoff.obd.sensors.FuelTrip()
+        var now = 0L
+        t.add(now, 6.0, 60) // first sample only sets the clock
+        // 59 s at 60 km/h and 6 L/h → 0.98 km: not yet
+        repeat(59) { now += 1000; t.add(now, 6.0, 60) }
+        assertNull(t.averagePer100)
+        repeat(2) { now += 1000; t.add(now, 6.0, 60) }
+        assertEquals(10.0, t.averagePer100!!, 1e-9) // 6 L/h at 60 km/h = 10 L/100km
+    }
+
+    @Test fun fuelTripIdleAddsLitersOnly() {
+        val t = com.chuikoff.obd.sensors.FuelTrip()
+        var now = 0L
+        t.add(now, 6.0, 60)
+        repeat(120) { now += 1000; t.add(now, 6.0, 60) } // 2 km, 0.2 L
+        repeat(60) { now += 1000; t.add(now, 0.9, 0) }   // 1 min idle: +0.015 L, +0 km
+        assertEquals(2.0, t.km, 1e-9)
+        assertEquals(0.215, t.liters, 1e-9)
+        assertEquals(10.75, t.averagePer100!!, 1e-9)
+    }
+
+    @Test fun fuelTripSkipsGapsAndUnknownSpeed() {
+        val t = com.chuikoff.obd.sensors.FuelTrip(maxGapMs = 10_000)
+        t.add(0, 6.0, 60)
+        t.add(1_000, 6.0, 60)
+        val km = t.km
+        t.add(61_000, 6.0, 60)   // 60 s gap (disconnect) → ignored
+        assertEquals(km, t.km, 1e-12)
+        t.add(62_000, 6.0, null) // unknown speed → ignored
+        assertEquals(km, t.km, 1e-12)
+        t.add(63_000, 6.0, 60)   // counted again (1 s since the previous sample)
+        assertEquals(km * 2, t.km, 1e-12)
+        t.reset()
+        assertEquals(0.0, t.km, 0.0); assertNull(t.averagePer100)
+    }
+
+    @Test fun speedDensityEstimateWithoutMaf() = runBlocking {
+        // Creta 1.6 MPI idle: 800 rpm, MAP 30 kPa, IAT 27 °C → ~3.1 g/s
+        assertEquals(3.14, com.chuikoff.obd.sensors.EngineMath.speedDensityGs(800, 30, 27, 1.591), 0.05)
+        val x = EngineExtras()
+        x.reset(setOf(0x0B, 0x0C, 0x0D, 0x0F))
+        assertTrue(EngineExtras.ID_FUEL in x.sensors().map { it.id })
+        val c = elm(mapOf("010B" to "410B1E\r\r>", "010F" to "410F43\r\r>", "010C" to "410C0C80\r\r>", "010D" to "410D00\r\r>"))
+        val f = x.sensors().first { it.id == EngineExtras.ID_FUEL }.read(c)
+        assertTrue(f.note!!.contains("MAP"))
+        assertTrue(f.statusLine!!.contains("л/ч"))
     }
 }

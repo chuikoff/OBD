@@ -51,7 +51,8 @@ fun ReadingsScreen(
     onClearCvtLog: () -> Unit = {},
     cvtExport: () -> String = { "" },
     onSaveDiag: () -> Unit = {},
-    onShareDiag: () -> Unit = {}
+    onShareDiag: () -> Unit = {},
+    onResetFuelTrip: () -> Unit = {}
 ) {
     val showCvtDebug = state.selectedProfile.id == "mitsubishi_outlander_gf_gg"
     Column(
@@ -86,14 +87,14 @@ fun ReadingsScreen(
                         ReadingCard(reading)
                     }
                     item(key = "diagnostics") {
-                        DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag)
+                        DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag, onResetFuelTrip)
                     }
                 }
             }
         }
         if (showCvtDebug && state.connectionState !is ConnectionState.Connected && state.cvtLog.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
-            DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag)
+            DiagnosticsBlock(state, showCvtDebug, onCvtFormula, onCvtDebugExtra, onClearCvtLog, cvtExport, onSaveDiag, onShareDiag, onResetFuelTrip)
         }
     }
 }
@@ -108,7 +109,8 @@ private fun DiagnosticsBlock(
     onClearCvtLog: () -> Unit,
     cvtExport: () -> String,
     onSaveDiag: () -> Unit,
-    onShareDiag: () -> Unit
+    onShareDiag: () -> Unit,
+    onResetFuelTrip: () -> Unit
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
     Card(
@@ -131,7 +133,7 @@ private fun DiagnosticsBlock(
                 }
                 state.readings.forEach { r ->
                     Spacer(Modifier.height(8.dp))
-                    SensorTechInfo(r)
+                    SensorTechInfo(r, onResetFuelTrip)
                 }
                 if (showCvtDebug) {
                     Spacer(Modifier.height(8.dp))
@@ -162,7 +164,7 @@ private fun CvtOilTechInfo(r: com.chuikoff.obd.sensors.CvtOilDegradation.Result?
 }
 
 @Composable
-private fun SensorTechInfo(reading: SensorReading) {
+private fun SensorTechInfo(reading: SensorReading, onResetFuelTrip: () -> Unit = {}) {
     val kind = TempColorScale.kindFor(reading.sensorId, reading.displayName)
     val small = MaterialTheme.typography.labelSmall
     val dim = MaterialTheme.colorScheme.onSurfaceVariant
@@ -177,6 +179,9 @@ private fun SensorTechInfo(reading: SensorReading) {
         reading.note?.let { Text("Источник: $it", style = small, color = dim) }
         reading.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error) }
         reading.rawHex?.let { Text("RAW: $it", style = small, fontFamily = FontFamily.Monospace) }
+        if (reading.sensorId == com.chuikoff.obd.sensors.EngineExtras.ID_FUEL) {
+            androidx.compose.material3.TextButton(onClick = onResetFuelTrip) { Text("Сбросить средний расход") }
+        }
     }
 }
 

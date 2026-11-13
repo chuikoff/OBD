@@ -14,6 +14,13 @@ object EngineMath {
     const val MOVING_KMH = 5
 
     fun mafGs(a: Int, b: Int): Double = (a * 256 + b) / 100.0
+
+    /** Assumed volumetric efficiency for the MAP-based estimate (no MAF sensor, e.g. Creta 1.6 MPI). */
+    const val VE = 0.85
+
+    /** Speed-density air mass, g/s: rpm/120 · Vd · VE · MAP / (R · T). */
+    fun speedDensityGs(rpm: Int, mapKpa: Int, iatC: Int, displacementL: Double, ve: Double = VE): Double =
+        rpm / 120.0 * displacementL / 1000.0 * ve * mapKpa * 1000.0 / (287.05 * (iatC + 273.15)) * 1000.0
     fun rpm(a: Int, b: Int): Int = (a * 256 + b) / 4
     fun moduleVoltage(a: Int, b: Int): Double = (a * 256 + b) / 1000.0
 
@@ -42,6 +49,38 @@ object EngineMath {
         }
         return out
     }
+}
+
+/**
+ * Trip average fuel consumption: integrates L/h and km/h over real time between successive valid
+ * fuel readings. Gaps longer than [maxGapMs] (disconnect, paused polling) and intervals with unknown
+ * speed are skipped, so they add neither liters nor km. Idle (0 km/h) adds liters only — correct for
+ * an average. The average is shown from [MIN_KM] on.
+ */
+class FuelTrip(private val maxGapMs: Long = 10_000) {
+    var liters = 0.0
+        private set
+    var km = 0.0
+        private set
+    private var lastMs: Long? = null
+
+    @Synchronized fun add(nowMs: Long, lph: Double, kmh: Int?) {
+        val prev = lastMs
+        lastMs = nowMs
+        if (prev == null || kmh == null) return
+        val dt = nowMs - prev
+        if (dt <= 0 || dt > maxGapMs) return
+        val h = dt / 3_600_000.0
+        liters += lph * h
+        km += kmh * h
+    }
+
+    /** L/100 km, or null until [MIN_KM] driven. */
+    val averagePer100: Double? get() = if (km >= MIN_KM) liters / km * 100.0 else null
+
+    @Synchronized fun reset() { liters = 0.0; km = 0.0; lastMs = null }
+
+    companion object { const val MIN_KM = 1.0 }
 }
 
 /** Battery / module voltage colors. */
@@ -81,11 +120,20 @@ class EngineExtras {
     private var lastKmh: Int? = null
     private var lastKmhMs = 0L
 
+    /** Engine displacement for the MAP estimate when there is no MAF (set per profile). */
+    @Volatile var displacementL = 1.6
+
+    val trip = FuelTrip()
+
     fun reset(supported: Set<Int>?) {
         this.supported = supported
         hidden.clear(); noData.clear()
         lastRpm = null; lastKmh = null
+        trip.reset()
     }
+
+    private fun hasMaf(s: Set<Int>?) = s?.contains(0x10) == true
+    private fun hasMap(s: Set<Int>?) = s != null && 0x0B in s && 0x0C in s && 0x0F in s
 
     fun engineRunning(now: Long = System.currentTimeMillis()): Boolean? =
         lastRpm?.takeIf { now - lastRpmMs < 20_000 }?.let { it > 400 }
@@ -95,13 +143,15 @@ class EngineExtras {
 
     private val voltage = Extra(ID_VOLTAGE, "Напряжение", "В", pid = null) { c -> readVoltage(c) }
     private val rpm = Extra(ID_RPM, "Обороты", "об/мин", pid = 0x0C) { c -> readRpm(c) }
-    private val fuel = Extra(ID_FUEL, "Расход топлива", "", pid = 0x10) { c -> readFuel(c) }
+    private val fuel = Extra(ID_FUEL, "Средний расход (поездка)", "л/100км", pid = 0x10) { c -> readFuel(c) }
     private val all = listOf(voltage, rpm, fuel)
 
     /** Sensors to poll now (supported and not hidden), in card order. */
     fun sensors(): List<SensorDefinition> {
         val s = supported ?: return listOf(voltage).filter { it.id !in hidden } // ATRV works without PID list
-        return all.filter { (it.pid == null || it.pid in s) && it.id !in hidden }
+        return all.filter {
+            (it.pid == null || it.pid in s || (it.id == ID_FUEL && hasMap(s))) && it.id !in hidden
+        }
     }
 
     private inner class Extra(
@@ -166,27 +216,56 @@ class EngineExtras {
     }
 
     private suspend fun readFuel(c: Elm327Client): SensorReading {
-        val raw = c.send("0110", timeoutMs = 1500)
-        val maf = bytes(raw, 0x10, 2)?.let { EngineMath.mafGs(it[0], it[1]) }
-        var rawAll = raw
+        val viaMaf = hasMaf(supported) || !hasMap(supported)
+        val raws = mutableListOf<String>()
+        var maf: Double? = null
+        var src = ""
+        if (viaMaf) {
+            val raw = c.send("0110", timeoutMs = 1500); raws += raw
+            maf = bytes(raw, 0x10, 2)?.let { EngineMath.mafGs(it[0], it[1]) }
+            src = "MAF 0110"
+        } else {
+            val rMap = c.send("010B", timeoutMs = 1500); raws += rMap
+            val rIat = c.send("010F", timeoutMs = 1500); raws += rIat
+            val map = bytes(rMap, 0x0B, 1)?.get(0)
+            val iat = bytes(rIat, 0x0F, 1)?.get(0)?.minus(40)
+            val now = System.currentTimeMillis()
+            var r = lastRpm?.takeIf { now - lastRpmMs < 3_000 }
+            if (r == null) {
+                val rr = c.send("010C", timeoutMs = 1500); raws += rr
+                r = bytes(rr, 0x0C, 2)?.let { EngineMath.rpm(it[0], it[1]) }
+                if (r != null) { lastRpm = r; lastRpmMs = now }
+            }
+            if (map != null && iat != null && r != null) maf = EngineMath.speedDensityGs(r, map, iat, displacementL)
+            src = String.format(Locale.US, "оценка по MAP/IAT/RPM (ДАД 010B=%s кПа, IAT=%s °C, VE %.2f, %.1f л)",
+                map ?: "—", iat ?: "—", EngineMath.VE, displacementL)
+        }
         if (maf != null && supported?.contains(0x0D) != false) {
             val rs = runCatching { c.send("010D", timeoutMs = 1500) }.getOrNull()
             if (rs != null) {
-                rawAll = "$raw | $rs"
+                raws += rs
                 VehicleSpeedReader.parse(rs)?.let { lastKmh = it; lastKmhMs = System.currentTimeMillis() }
             }
         }
-        if (maf == null) return reading(fuel, null, null, raw, note = "SAE 0110 (MAF)")
+        val rawAll = raws.joinToString(" | ")
+        if (maf == null) return reading(fuel, null, null, rawAll, note = src)
         val lph = EngineMath.litersPerHour(maf)
         val kmh = speed()
+        trip.add(System.currentTimeMillis(), lph, kmh)
         val per100 = EngineMath.litersPer100km(lph, kmh)
-        val text = if (per100 != null) String.format(Locale.US, "%.1f л/100км", per100)
+        val instant = if (per100 != null) String.format(Locale.US, "%.1f л/100км", per100)
         else String.format(Locale.US, "%.1f л/ч", lph)
+        val avg = trip.averagePer100
+        val text = avg?.let { String.format(Locale.US, "%.1f л/100км", it) } ?: "копится…"
+        val status = if (avg != null)
+            String.format(Locale.US, "сейчас %s · %.1f км · %.2f л", instant, trip.km, trip.liters)
+        else String.format(Locale.US, "средний после 1 км: пройдено %.1f км · сейчас %s", trip.km, instant)
         return reading(
-            fuel, per100 ?: lph, text, rawAll,
-            note = "Расчёт по MAF 0110: бензин, AFR 14.7, плотность 0.745 кг/л (мгновенный, ориентировочно)",
-            detail = String.format(Locale.US, "MAF %.2f г/с · %.2f л/ч · скорость %s", maf, lph, kmh?.let { "$it км/ч" } ?: "—")
-        )
+            fuel, avg ?: (per100 ?: lph), text, rawAll,
+            note = "Средний за поездку (с подключения): литры ÷ км. Литры по $src: бензин, AFR 14.7, 0.745 кг/л — ориентировочно",
+            detail = String.format(Locale.US, "Поездка: %.2f км, %.3f л · воздух %.2f г/с · %.2f л/ч · скорость %s",
+                trip.km, trip.liters, maf, lph, kmh?.let { "$it км/ч" } ?: "—")
+        ).copy(statusLine = status)
     }
 
     companion object {

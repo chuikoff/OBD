@@ -57,6 +57,10 @@ data class ObdUiState(
     val selectedProfile: VehicleProfile = VehicleProfileRegistry.default,
     /** Card ids the user hid for [selectedProfile] (long-press «Скрыть»), saved per profile. */
     val hiddenReadings: Set<String> = emptySet(),
+    /** «Сброс среднего расхода» (Профиль). */
+    val fuelResetMode: com.chuikoff.obd.sensors.FuelResetMode = com.chuikoff.obd.sensors.FuelResetMode.MANUAL,
+    /** «Переподключиться» on «Показания» in progress. */
+    val reconnecting: Boolean = false,
     val preferredTransport: TransportType = TransportType.CLASSIC_SPP,
     val devices: List<DiscoveredDevice> = emptyList(),
     val isScanning: Boolean = false,
@@ -155,6 +159,8 @@ class ObdController private constructor(private val app: Application) {
     private val alertEngine = AlertEngine()
     private val lastAlertSampleTs = mutableMapOf<String, Long>()
     private val engineExtras = EngineExtras()
+    private var tripProfileId: String? = null
+    private var tripSavedAtMs = 0L
     private val ignition = IgnitionWatch()
     private var autoJob: Job? = null
     private var lastAutoAttemptMs: Long? = null
@@ -177,6 +183,7 @@ class ObdController private constructor(private val app: Application) {
             _ui.update { it.copy(readings = readings, statusMessage = "Опрос датчиков") }
             publishLiveFromReadings(readings, connected = true)
             onPublished(readings)
+            maybeSaveTrip()
         }
         override fun tickFailed(message: String) {
             _ui.update {
@@ -224,6 +231,10 @@ class ObdController private constructor(private val app: Application) {
             )
         }
         loadHidden()
+        val fuelMode = com.chuikoff.obd.sensors.FuelResetMode.of(settingsPrefs.getString(K_FUEL_MODE, null))
+        engineExtras.trip.mode = fuelMode
+        _ui.update { it.copy(fuelResetMode = fuelMode) }
+        switchTripProfile(_ui.value.selectedProfile.id)
         scope.launch {
             CvtDebugLog.entries.collect { list -> _ui.update { it.copy(cvtLog = list) } }
         }
@@ -281,8 +292,71 @@ class ObdController private constructor(private val app: Application) {
         loadHidden()
     }
 
-    /** «Сбросить» for the trip average fuel consumption (also reset on every new connection). */
-    fun resetFuelTrip() = engineExtras.trip.reset()
+    // ---------------------------------------------------------------- 1.15.1: persistent fuel average
+
+
+    private fun tripKey(profileId: String) = "fuel_trip_$profileId"
+
+    /** Saves the running average under its profile and loads the one of [profileId] (each car its own). */
+    @Synchronized private fun switchTripProfile(profileId: String) {
+        if (tripProfileId == profileId) return
+        saveTrip()
+        val t = engineExtras.trip
+        val saved = com.chuikoff.obd.sensors.FuelTrip.parse(settingsPrefs.getString(tripKey(profileId), null))
+        if (saved != null) t.restore(saved.first, saved.second, saved.third) else t.reset()
+        tripProfileId = profileId
+        saveTrip()
+    }
+
+    @Synchronized private fun saveTrip() {
+        val id = tripProfileId ?: return
+        settingsPrefs.edit().putString(tripKey(id), engineExtras.trip.serialize()).apply()
+        tripSavedAtMs = System.currentTimeMillis()
+    }
+
+    private fun maybeSaveTrip() {
+        if (System.currentTimeMillis() - tripSavedAtMs >= TRIP_SAVE_EVERY_MS) saveTrip()
+    }
+
+    /** «Сбросить средний расход» (карточка → диагностика, и Профиль). */
+    fun resetFuelTrip() {
+        engineExtras.trip.reset()
+        saveTrip()
+    }
+
+    fun setFuelResetMode(mode: com.chuikoff.obd.sensors.FuelResetMode) {
+        settingsPrefs.edit().putString(K_FUEL_MODE, mode.name).apply()
+        engineExtras.trip.mode = mode
+        _ui.update { it.copy(fuelResetMode = mode) }
+    }
+
+    /** «Переподключиться» (Показания): close the link to the same adapter and connect again. */
+    fun reconnectNow() {
+        if (_ui.value.reconnecting || busExclusive()) return
+        val s = _ui.value
+        val device = s.connectedAddress?.let { DiscoveredDevice(s.lastAdapter?.takeIf { l -> l.address == it }?.name, it, s.preferredTransport) }
+            ?: s.lastAdapter?.let { DiscoveredDevice(it.name, it.address, it.transport) }
+            ?: return
+        autoJob?.cancel()
+        autoJob = null
+        connectJob?.cancel()
+        _ui.update { it.copy(reconnecting = true, connectionState = ConnectionState.Connecting, statusMessage = "Переподключение…") }
+        com.chuikoff.obd.diag.DiagLog.event("Кнопка «Переподключиться»")
+        connectJob = scope.launch {
+            try {
+                poller.stop()
+                saveTrip()
+                runCatching { classic.disconnect() }
+                runCatching { ble.disconnect() }
+                activeTransport = null
+                elm = null
+                kotlinx.coroutines.delay(700) // let the adapter drop the RFCOMM link
+                doConnect(device, auto = false)
+            } finally {
+                _ui.update { it.copy(reconnecting = false) }
+            }
+        }
+    }
 
     /** Plain-text export of the last ~50 CVT responses + context (coolant/ambient now). */
     fun cvtLogExportText(): String {
@@ -361,6 +435,7 @@ class ObdController private constructor(private val app: Application) {
         settingsPrefs.edit().putString(K_PROFILE, profile.id).apply()
         _ui.update { it.copy(selectedProfile = profile) }
         loadHidden()
+        switchTripProfile(profile.id)
         CretaAtf.reset()
         if (_ui.value.connectionState is ConnectionState.Connected) {
             restartPolling()
@@ -510,6 +585,9 @@ class ObdController private constructor(private val app: Application) {
                 // only used without MAF (MAP estimate): Creta 1.6 MPI = 1.591 л
                 engineExtras.displacementL = if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) 2.0 else 1.591
                 engineExtras.clusterTank = _ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID
+                switchTripProfile(_ui.value.selectedProfile.id)
+                if (engineExtras.trip.onConnect()) com.chuikoff.obd.diag.DiagLog.event("Средний расход сброшен (${engineExtras.trip.mode.titleRu})")
+                saveTrip()
                 val last = LastAdapter(device.address, device.name, usedType)
                 saveLastAdapter(last)
                 alertEngine.resetTrip()
@@ -577,6 +655,7 @@ class ObdController private constructor(private val app: Application) {
         ignition.stop()
         scope.launch {
             poller.stop()
+            saveTrip()
             stopMonitorService()
             // both: a reconnect cancelled mid-way may have opened the other transport
             runCatching { classic.disconnect() }
@@ -940,6 +1019,7 @@ class ObdController private constructor(private val app: Application) {
 
     private fun onReconnectGaveUp(reason: String) {
         ignition.stop()
+        saveTrip()
         elm = null
         activeTransport = null
         cvtTempSmoother.reset()
@@ -1114,6 +1194,7 @@ class ObdController private constructor(private val app: Application) {
             com.chuikoff.obd.sensors.CretaAmbient.reset()
             _ui.update { it.copy(selectedProfile = match, statusMessage = "Профиль выбран по VIN: ${match.displayNameRu}") }
             loadHidden()
+            switchTripProfile(match.id)
         }
     }
 
@@ -1332,6 +1413,7 @@ class ObdController private constructor(private val app: Application) {
     /** Activity destroyed: the connection stays (Android Auto / notification «Стоп»), only scanning stops. */
     fun onUiDestroyed() {
         stopScan()
+        saveTrip()
     }
 
     /** Readable reason; missing «Устройства поблизости» permission gets an actionable hint. */
@@ -1350,6 +1432,8 @@ class ObdController private constructor(private val app: Application) {
         private const val K_CVT_FORMULA = "formula"
         private const val K_CVT_DEBUG_EXTRA = "debug_extra"
         private const val K_PROFILE = "profile_id"
+        private const val K_FUEL_MODE = "fuel_reset_mode"
+        private const val TRIP_SAVE_EVERY_MS = 15_000L
         private const val K_AMB_VALUE = "shown_c"
         private const val K_AMB_AT = "shown_at_ms"
         private const val AMBIENT_MAX_HELD = 10

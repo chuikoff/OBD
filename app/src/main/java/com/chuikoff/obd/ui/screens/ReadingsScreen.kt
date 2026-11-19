@@ -60,7 +60,8 @@ fun ReadingsScreen(
     onSaveDiag: () -> Unit = {},
     onShareDiag: () -> Unit = {},
     onResetFuelTrip: () -> Unit = {},
-    onSetHidden: (String, Boolean) -> Unit = { _, _ -> }
+    onSetHidden: (String, Boolean) -> Unit = { _, _ -> },
+    onReconnect: () -> Unit = {}
 ) {
     val showCvtDebug = state.selectedProfile.id == "mitsubishi_outlander_gf_gg"
     Column(
@@ -74,6 +75,18 @@ fun ReadingsScreen(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.primary
         )
+        if (state.lastAdapter != null || state.connectedAddress != null) {
+            val busy = state.reconnecting || state.connectionState is ConnectionState.Connecting
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = onReconnect, enabled = !busy && !state.dtcBusy && !state.passportBusy && !state.diagBusy) {
+                    Text(if (busy) "Переподключение…" else "Переподключиться")
+                }
+                if (busy) {
+                    Spacer(Modifier.width(12.dp))
+                    androidx.compose.material3.CircularProgressIndicator(Modifier.height(20.dp).width(20.dp), strokeWidth = 2.dp)
+                }
+            }
+        }
         Spacer(Modifier.height(12.dp))
 
         when (state.connectionState) {

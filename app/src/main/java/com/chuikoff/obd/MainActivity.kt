@@ -168,7 +168,8 @@ fun ObdApp(vm: ObdController, onEnsurePermissions: () -> Unit = {}) {
                     onSaveDiag = vm::saveDiagnostics,
                     onShareDiag = vm::shareDiagnostics,
                     onResetFuelTrip = vm::resetFuelTrip,
-                    onSetHidden = vm::setReadingHidden
+                    onSetHidden = vm::setReadingHidden,
+                    onReconnect = vm::reconnectNow
                 )
                 2 -> DiagnosticsScreen(
                     state = state,
@@ -187,7 +188,9 @@ fun ObdApp(vm: ObdController, onEnsurePermissions: () -> Unit = {}) {
                     onAlertSettings = vm::setAlertSettings,
                     onTestAlert = vm::testAlert,
                     onAutoConnect = vm::setAutoConnect,
-                    onAutoConnectBluetooth = vm::setAutoConnectOnBluetooth
+                    onAutoConnectBluetooth = vm::setAutoConnectOnBluetooth,
+                    onFuelResetMode = vm::setFuelResetMode,
+                    onResetFuelTrip = vm::resetFuelTrip
                 )
             }
         }

@@ -57,14 +57,41 @@ object EngineMath {
  * speed are skipped, so they add neither liters nor km. Idle (0 km/h) adds liters only — correct for
  * an average. The average is shown from [MIN_KM] on.
  */
-class FuelTrip(private val maxGapMs: Long = 10_000) {
+class FuelTrip(private val maxGapMs: Long = 10_000, private val clock: () -> Long = System::currentTimeMillis) {
     var liters = 0.0
         private set
     var km = 0.0
         private set
+    /** When the accumulation started (last reset). */
+    var startedAtMs: Long = clock()
+        private set
     private var lastMs: Long? = null
 
+    /** When to start over by itself; default — only by the button. */
+    @Volatile var mode: FuelResetMode = FuelResetMode.MANUAL
+    @Volatile var zone: java.time.ZoneId = java.time.ZoneId.systemDefault()
+
+    /** Called on every successful connection: no time gap is integrated; resets per [mode]. True if reset. */
+    @Synchronized fun onConnect(nowMs: Long = clock()): Boolean {
+        lastMs = null
+        val r = mode == FuelResetMode.EACH_CONNECT || dayChanged(nowMs)
+        if (r) reset(nowMs)
+        return r
+    }
+
+    private fun dayChanged(nowMs: Long): Boolean =
+        mode == FuelResetMode.DAILY && !sameDay(startedAtMs, nowMs, zone)
+
+    @Synchronized fun restore(liters: Double, km: Double, startedAtMs: Long) {
+        this.liters = liters.coerceAtLeast(0.0); this.km = km.coerceAtLeast(0.0)
+        this.startedAtMs = startedAtMs; lastMs = null
+    }
+
+    /** «liters;km;startedAtMs» for SharedPreferences. */
+    @Synchronized fun serialize(): String = "$liters;$km;$startedAtMs"
+
     @Synchronized fun add(nowMs: Long, lph: Double, kmh: Int?) {
+        if (dayChanged(nowMs)) reset(nowMs)
         val prev = lastMs
         lastMs = nowMs
         if (prev == null || kmh == null) return
@@ -78,9 +105,36 @@ class FuelTrip(private val maxGapMs: Long = 10_000) {
     /** L/100 km, or null until [MIN_KM] driven. */
     val averagePer100: Double? get() = if (km >= MIN_KM) liters / km * 100.0 else null
 
-    @Synchronized fun reset() { liters = 0.0; km = 0.0; lastMs = null }
+    @Synchronized fun reset(nowMs: Long = clock()) { liters = 0.0; km = 0.0; lastMs = null; startedAtMs = nowMs }
 
-    companion object { const val MIN_KM = 1.0 }
+    companion object {
+        const val MIN_KM = 1.0
+
+        fun sameDay(a: Long, b: Long, zone: java.time.ZoneId): Boolean =
+            java.time.Instant.ofEpochMilli(a).atZone(zone).toLocalDate() ==
+                java.time.Instant.ofEpochMilli(b).atZone(zone).toLocalDate()
+
+        /** Parses [serialize]; null if absent/garbled. */
+        fun parse(s: String?): Triple<Double, Double, Long>? {
+            val p = s?.split(';') ?: return null
+            if (p.size != 3) return null
+            val l = p[0].toDoubleOrNull() ?: return null
+            val k = p[1].toDoubleOrNull() ?: return null
+            val t = p[2].toLongOrNull() ?: return null
+            return Triple(l, k, t)
+        }
+    }
+}
+
+/** «Сброс среднего расхода» setting. */
+enum class FuelResetMode(val titleRu: String) {
+    EACH_CONNECT("При каждом подключении"),
+    DAILY("Раз в сутки"),
+    MANUAL("Вручную");
+
+    companion object {
+        fun of(name: String?): FuelResetMode = entries.firstOrNull { it.name == name } ?: MANUAL
+    }
 }
 
 /** Battery / module voltage colors. */
@@ -136,7 +190,7 @@ class EngineExtras {
         this.supported = supported
         hidden.clear(); noData.clear()
         lastRpm = null; lastKmh = null
-        trip.reset()
+        // trip: kept across connections, the controller applies the reset mode (FuelTrip.onConnect)
         tankLiters = null; tankMs = 0L
     }
 
@@ -151,7 +205,7 @@ class EngineExtras {
 
     private val voltage = Extra(ID_VOLTAGE, "Напряжение", "В", pid = null) { c -> readVoltage(c) }
     private val rpm = Extra(ID_RPM, "Обороты", "об/мин", pid = 0x0C) { c -> readRpm(c) }
-    private val fuel = Extra(ID_FUEL, "Средний расход (поездка)", "л/100км", pid = 0x10) { c -> readFuel(c) }
+    private val fuel = Extra(ID_FUEL, "Средний расход", "л/100км", pid = 0x10) { c -> readFuel(c) }
     private val all = listOf(voltage, rpm, fuel)
 
     /** Cards the user hid on the «Показания» tab: not polled at all (saves bus time). */
@@ -271,12 +325,13 @@ class EngineExtras {
         val tank = tankLiters?.let { String.format(Locale.US, " · в баке %.1f л", it) } ?: ""
         val avg = trip.averagePer100
         val text = avg?.let { String.format(Locale.US, "%.1f л/100км", it) } ?: "копится…"
+        val since = " · с " + java.text.SimpleDateFormat("dd.MM HH:mm", Locale.US).format(java.util.Date(trip.startedAtMs))
         val status = if (avg != null)
-            String.format(Locale.US, "сейчас %s · %.1f км · %.2f л", instant, trip.km, trip.liters) + tank
-        else String.format(Locale.US, "средний после 1 км: пройдено %.1f км · сейчас %s", trip.km, instant) + tank
+            String.format(Locale.US, "сейчас %s · %.1f км · %.2f л", instant, trip.km, trip.liters) + since + tank
+        else String.format(Locale.US, "средний после 1 км: пройдено %.1f км · сейчас %s", trip.km, instant) + since + tank
         return reading(
             fuel, avg ?: (per100 ?: lph), text, rawAll,
-            note = "Средний за поездку (с подключения): литры ÷ км. Литры по $src: бензин, AFR 14.7, 0.745 кг/л — ориентировочно" +
+            note = "Средний с последнего сброса (${trip.mode.titleRu.lowercase()}): литры ÷ км. Литры по $src: бензин, AFR 14.7, 0.745 кг/л — ориентировочно" +
                 (if (clusterTank) ". В баке — приборка 7C6 22 B002" else ""),
             detail = String.format(Locale.US, "Поездка: %.2f км, %.3f л · воздух %.2f г/с · %.2f л/ч · скорость %s",
                 trip.km, trip.liters, maf, lph, kmh?.let { "$it км/ч" } ?: "—")

@@ -20,6 +20,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -35,7 +37,9 @@ fun ProfileScreen(
     onAlertSettings: (AlertSettings) -> Unit = {},
     onTestAlert: () -> Unit = {},
     onAutoConnect: (Boolean) -> Unit = {},
-    onAutoConnectBluetooth: (Boolean) -> Unit = {}
+    onAutoConnectBluetooth: (Boolean) -> Unit = {},
+    onFuelResetMode: (com.chuikoff.obd.sensors.FuelResetMode) -> Unit = {},
+    onResetFuelTrip: () -> Unit = {}
 ) {
     Column(
         Modifier
@@ -84,6 +88,8 @@ fun ProfileScreen(
         AlertsCard(state.alertSettings, onAlertSettings, onTestAlert)
         Spacer(Modifier.height(16.dp))
         AutoConnectCard(state, onAutoConnect, onAutoConnectBluetooth)
+        Spacer(Modifier.height(16.dp))
+        FuelResetCard(state, onFuelResetMode, onResetFuelTrip)
         Spacer(Modifier.height(24.dp))
     }
 }
@@ -171,5 +177,46 @@ private fun AutoConnectCard(state: ObdUiState, onAuto: (Boolean) -> Unit, onAuto
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+@Composable
+private fun FuelResetCard(
+    state: ObdUiState,
+    onMode: (com.chuikoff.obd.sensors.FuelResetMode) -> Unit,
+    onReset: () -> Unit
+) {
+    var confirm by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Сброс среднего расхода", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Средний расход копится и между подключениями, и после перезапуска приложения — свой для каждой машины.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            com.chuikoff.obd.sensors.FuelResetMode.entries.forEach { mode ->
+                Row(
+                    Modifier.fillMaxWidth().clickable { onMode(mode) },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = state.fuelResetMode == mode, onClick = { onMode(mode) })
+                    Text(mode.titleRu + when (mode) {
+                        com.chuikoff.obd.sensors.FuelResetMode.DAILY -> " (в полночь)"
+                        com.chuikoff.obd.sensors.FuelResetMode.MANUAL -> " (только кнопкой)"
+                        else -> ""
+                    }, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            OutlinedButton(onClick = { confirm = true }) { Text("Сбросить средний расход сейчас") }
+        }
+    }
+    if (confirm) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = { Text("Сбросить средний расход?") },
+            text = { Text("Накопленные километры и литры для «${state.selectedProfile.displayNameRu}» обнулятся.") },
+            confirmButton = { TextButton(onClick = { confirm = false; onReset() }) { Text("Сбросить") } },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Отмена") } }
+        )
     }
 }

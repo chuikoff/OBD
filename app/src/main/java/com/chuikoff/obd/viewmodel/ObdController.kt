@@ -275,6 +275,14 @@ class ObdController private constructor(private val app: Application) {
 
     fun clearCvtLog() = CvtDebugLog.clear()
 
+    /** Per-car engine parameters for the fuel card; on connect and on every profile change. */
+    private fun applyEngineProfile() {
+        val outlander = _ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID
+        // only used without MAF (MAP estimate): Creta 1.6 MPI = 1.591 л
+        engineExtras.displacementL = if (outlander) 2.0 else 1.591
+        engineExtras.clusterTank = !outlander
+    }
+
     private fun hiddenKey(profileId: String) = "hidden_readings_$profileId"
 
     private fun loadHidden() {
@@ -436,7 +444,9 @@ class ObdController private constructor(private val app: Application) {
         _ui.update { it.copy(selectedProfile = profile) }
         loadHidden()
         switchTripProfile(profile.id)
+        applyEngineProfile()
         CretaAtf.reset()
+        com.chuikoff.obd.sensors.CretaAmbient.reset()
         if (_ui.value.connectionState is ConnectionState.Connected) {
             restartPolling()
         }
@@ -582,9 +592,7 @@ class ObdController private constructor(private val app: Application) {
                 elm!!.ensureInitialized()
                 engineExtras.reset(readSupportedPids(elm!!))
                 autoSelectProfileByVin(elm!!)
-                // only used without MAF (MAP estimate): Creta 1.6 MPI = 1.591 л
-                engineExtras.displacementL = if (_ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID) 2.0 else 1.591
-                engineExtras.clusterTank = _ui.value.selectedProfile.id != Poller.OUTLANDER_PROFILE_ID
+                applyEngineProfile()
                 switchTripProfile(_ui.value.selectedProfile.id)
                 if (engineExtras.trip.onConnect()) com.chuikoff.obd.diag.DiagLog.event("Средний расход сброшен (${engineExtras.trip.mode.titleRu})")
                 saveTrip()
@@ -713,7 +721,7 @@ class ObdController private constructor(private val app: Application) {
                         log += line
                         _ui.update { it.copy(dtcLog = log.toList()) }
                     }
-                    val report = if (full) scanner.full { p -> _ui.update { it.copy(dtcStatus = "Полная проверка: $p…") } }
+                    val report = if (full) scanner.full(fullModules(), isOutlander()) { p -> _ui.update { it.copy(dtcStatus = "Полная проверка: $p…") } }
                     else scanner.quick(quickModules()) { p -> _ui.update { it.copy(dtcStatus = "Быстрая проверка: $p…") } }
                     _ui.update {
                         it.copy(dtcReport = report, dtcScanned = true, dtcStatus = report.summaryRu(), dtcError = null,
@@ -729,6 +737,12 @@ class ObdController private constructor(private val app: Application) {
             }
         }
     }
+
+    private fun isOutlander() = _ui.value.selectedProfile.id == Poller.OUTLANDER_PROFILE_ID
+
+    /** Module table for «Полная проверка» of the selected car. */
+    private fun fullModules(): List<com.chuikoff.obd.diag.DiagModule> =
+        if (isOutlander()) com.chuikoff.obd.diag.DtcDecode.OUTLANDER_MODULES else com.chuikoff.obd.diag.DtcDecode.HYUNDAI_MODULES
 
     /** Key modules for «Быстрая проверка» of the selected car. */
     private fun quickModules(): List<com.chuikoff.obd.diag.DiagModule> =
@@ -806,10 +820,12 @@ class ObdController private constructor(private val app: Application) {
                     }
                     // 2) every module that listed codes in the last full check: UDS 14 / KWP 14 + re-read
                     val scanner = com.chuikoff.obd.diag.DtcScanner(client) { log += it }
-                    val known = _ui.value.dtcReport?.modules ?: run {
+                    // after a quick check only its 8–9 modules are known → find codes in every module first
+                    val known = _ui.value.dtcReport?.takeIf { it.full }?.modules ?: run {
                         _ui.update { it.copy(dtcStatus = "Сброс: сначала ищу блоки с кодами (полная проверка)…") }
-                        runCatching { scanner.full { p -> _ui.update { it.copy(dtcStatus = "Сброс, поиск кодов: $p…") } } }
+                        runCatching { scanner.full(fullModules(), isOutlander()) { p -> _ui.update { it.copy(dtcStatus = "Сброс, поиск кодов: $p…") } } }
                             .getOrNull()?.also { r -> _ui.update { it.copy(dtcReport = r) } }?.modules
+                            ?: _ui.value.dtcReport?.modules
                     }
                     val targets = known?.filter { it.codes.isNotEmpty() }.orEmpty()
                     val outcomes = scanner.clear(targets) { p -> _ui.update { it.copy(dtcStatus = "Сброс: $p…") } }
@@ -821,7 +837,7 @@ class ObdController private constructor(private val app: Application) {
                         val old = st.dtcReport
                         val mods = old?.modules?.map { m -> outcomes.firstOrNull { it.module.tx == m.module.tx }?.after ?: m }
                         val report = when {
-                            q != null && old != null -> q.copy(modules = mods, tpms = old.tpms)
+                            q != null && old != null -> q.copy(modules = mods, tpms = old.tpms, full = old.full)
                             q != null -> q
                             else -> old?.copy(timestampMs = now, modules = mods)
                         }
@@ -990,6 +1006,9 @@ class ObdController private constructor(private val app: Application) {
             val transport = activeTransport ?: return false
             elm = Elm327Client(transport).also { watchLink(it) }
             elm!!.ensureInitialized()
+            // a reconnect is a connection too: «При каждом подключении» / «Раз в сутки» apply here as well
+            if (engineExtras.trip.onConnect()) com.chuikoff.obd.diag.DiagLog.event("Средний расход сброшен (${engineExtras.trip.mode.titleRu})")
+            saveTrip()
             _ui.update {
                 it.copy(
                     connectionState = ConnectionState.Connected,
@@ -1172,10 +1191,10 @@ class ObdController private constructor(private val app: Application) {
         }
     }
 
-    /** 0100/0120/0140 right after init (functional 7DF); fallback: PID list of the saved passport. */
     /**
      * The Creta was scanned with the Outlander profile (13.11 diag files): read the VIN once per
-     * connection (functional 0902) and switch to the matching profile. Unknown make → keep the choice.
+     * connection (functional 0902) and switch to the matching profile. Unknown make or no answer →
+     * keep the choice (the saved passport is shared by both cars, so it is NOT used as a fallback).
      */
     private suspend fun autoSelectProfileByVin(client: Elm327Client) {
         val raw = try {
@@ -1185,7 +1204,10 @@ class ObdController private constructor(private val app: Application) {
         } catch (_: Exception) {
             return
         }
-        val vin = Passport.parseVin(raw) ?: _ui.value.passport?.vin
+        val vin = Passport.parseVin(raw) ?: run {
+            com.chuikoff.obd.diag.DiagLog.event("VIN не прочитан (0902) — профиль не меняю")
+            return
+        }
         val match = VehicleProfileRegistry.forVin(vin) ?: return
         com.chuikoff.obd.diag.DiagLog.event("VIN $vin → профиль ${match.displayNameRu}")
         if (match.id != _ui.value.selectedProfile.id) {
@@ -1195,9 +1217,11 @@ class ObdController private constructor(private val app: Application) {
             _ui.update { it.copy(selectedProfile = match, statusMessage = "Профиль выбран по VIN: ${match.displayNameRu}") }
             loadHidden()
             switchTripProfile(match.id)
+            applyEngineProfile()
         }
     }
 
+    /** 0100/0120/0140 right after init (functional 7DF); fallback: PID list of the saved passport. */
     private suspend fun readSupportedPids(client: Elm327Client): Set<Int>? {
         val replies = mutableListOf<String>()
         for ((i, base) in listOf(0x00, 0x20, 0x40).withIndex()) {

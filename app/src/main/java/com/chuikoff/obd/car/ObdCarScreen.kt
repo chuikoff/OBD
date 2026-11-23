@@ -143,7 +143,7 @@ class ObdCarScreen(carContext: CarContext) : Screen(carContext) {
             )
 
         return PaneTemplate.Builder(paneBuilder.build())
-            .setTitle("OBD Outlander")
+            .setTitle(if (snap.gearboxTitle == "CVT") "OBD Outlander" else "OBD Creta")
             .setHeaderAction(Action.APP_ICON)
             .build()
     }

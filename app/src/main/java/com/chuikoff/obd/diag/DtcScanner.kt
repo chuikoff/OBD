@@ -66,7 +66,7 @@ class DtcScanner(
         } finally {
             restore()
         }
-        val merged = (physicalObd + q.obdCodes).sortedBy { if (it.ecuId == null) 1 else 0 }.distinctBy { it.code to it.kind }
+        val merged = DtcDecode.mergeObdCodes(physicalObd + q.obdCodes)
         q.copy(timestampMs = System.currentTimeMillis(), modules = results, obdCodes = merged)
     }
 
@@ -83,14 +83,22 @@ class DtcScanner(
         return DtcReport(System.currentTimeMillis(), mil, codes, answered)
     }
 
-    /** @param onProgress «7D1 (12/50)» for the status line. */
-    suspend fun full(onProgress: (String) -> Unit = {}): DtcReport {
+    /**
+     * @param modules the car's module table ([DtcDecode.HYUNDAI_MODULES] / [DtcDecode.OUTLANDER_MODULES]);
+     * @param outlander Mitsubishi TPMS sources instead of the Hyundai/Kia ones.
+     * @param onProgress «7D1 (12/50)» for the status line.
+     */
+    suspend fun full(
+        modules: List<DiagModule> = DtcDecode.HYUNDAI_MODULES,
+        outlander: Boolean = false,
+        onProgress: (String) -> Unit = {}
+    ): DtcReport {
         val q = quick()
         val results = mutableListOf<ModuleResult>()
         client.probing {
             try {
                 val found = runCatching { discover(onProgress) }.onFailure { if (it is CancellationException) throw it }.getOrDefault(emptyMap())
-                val known = DtcDecode.HYUNDAI_MODULES.map { k -> found[k.tx]?.let { rx -> k.copy(rx = rx) } ?: k }
+                val known = modules.map { k -> found[k.tx]?.let { rx -> k.copy(rx = rx) } ?: k }
                 val extra = found.filterKeys { t -> known.none { it.tx == t } }
                     .map { (t, rx) -> DiagModule("Блок $t (найден поиском)", t, rx) }
                 val mods = known + extra
@@ -107,10 +115,11 @@ class DtcScanner(
             }
         }
         // physical OBD modes of the engine/TCM may list codes the functional request missed
-        val merged = (physicalObd + q.obdCodes).sortedBy { if (it.ecuId == null) 1 else 0 }
-            .distinctBy { it.code to it.kind }
+        val merged = DtcDecode.mergeObdCodes(physicalObd + q.obdCodes)
         onProgress("давление в шинах (TPMS)")
-        val tpms = client.probing { try { Tpms.probe(client) { l -> log(l) } } finally { restore() } }
+        val tpms = client.probing {
+            try { if (outlander) Tpms.probeOutlander(client) { l -> log(l) } else Tpms.probe(client) { l -> log(l) } } finally { restore() }
+        }
         return q.copy(timestampMs = System.currentTimeMillis(), modules = results, obdCodes = merged, tpms = tpms, full = true)
     }
 
@@ -127,7 +136,7 @@ class DtcScanner(
 
     companion object {
         /** Body/TPMS modules: also ask KWP when UDS listed nothing. */
-        val KWP_TOO = setOf("7A0", "7A5", "7D6", "770", "771", "7C6", "784", "7B6", "743", "773", "600")
+        val KWP_TOO = setOf("7A0", "7A5", "7D6", "770", "771", "7C6", "784", "7B6", "743", "773", "600", "688", "6A0")
     }
 
     /**
@@ -224,6 +233,7 @@ class DtcScanner(
             safeTx("1003", tag) // extended session, then once more
             r = uds("1902FF")
             if (rejected(r)) r = uds("190209")
+            safeTx("1001", tag) // back to the default session
         }
         if (r is DtcDecode.Reply.Codes) {
             // 1.14.5: the Creta BCM/TPMS (7A0) answered «59 02 09» with no records to 19 02 FF while
@@ -298,7 +308,20 @@ class DtcScanner(
                     fun b(m: Elm327Parser.ObdMessage, i: Int) = if (i < m.bytes.size) Elm327Parser.toUnsigned(m.bytes[i]) else -1
                     if (msgs.any { b(it, 0) == 0x54 }) return true
                     val nrc = msgs.firstOrNull { b(it, 0) == 0x7F && b(it, 1) == 0x14 && b(it, 2) != 0x78 }?.let { b(it, 2) }
-                    if (nrc == null && msgs.any { b(it, 0) == 0x7F && b(it, 1) == 0x14 }) { delay(1500); return true } // only «78 pending»
+                    if (nrc == null && msgs.any { b(it, 0) == 0x7F && b(it, 1) == 0x14 }) {
+                        // only «78 response pending»: wait for the final answer (54 / NRC), asking again
+                        for (i in 1..3) {
+                            delay(1500L)
+                            val again = try { tx(req, tag, timeoutMs = 6000) } catch (e: CancellationException) { throw e } catch (_: Exception) { "" }
+                            val ms = Elm327Parser.assemble(again).filter { it.bytes.isNotEmpty() }
+                            if (ms.any { b(it, 0) == 0x54 }) return true
+                            ms.firstOrNull { b(it, 0) == 0x7F && b(it, 1) == 0x14 && b(it, 2) != 0x78 }?.let {
+                                why = DtcDecode.nrcRu(b(it, 2)); return false
+                            }
+                        }
+                        why = "блок ответил «подождите» (78) и не подтвердил сброс"
+                        return false
+                    }
                     why = when {
                         nrc != null -> DtcDecode.nrcRu(nrc)
                         msgs.isEmpty() -> "нет ответа"

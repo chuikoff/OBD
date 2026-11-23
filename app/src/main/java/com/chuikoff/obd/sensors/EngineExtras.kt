@@ -59,11 +59,14 @@ object EngineMath {
  */
 class FuelTrip(private val maxGapMs: Long = 10_000, private val clock: () -> Long = System::currentTimeMillis) {
     var liters = 0.0
+        @Synchronized get
         private set
     var km = 0.0
+        @Synchronized get
         private set
     /** When the accumulation started (last reset). */
     var startedAtMs: Long = clock()
+        @Synchronized get
         private set
     private var lastMs: Long? = null
 
@@ -103,7 +106,7 @@ class FuelTrip(private val maxGapMs: Long = 10_000, private val clock: () -> Lon
     }
 
     /** L/100 km, or null until [MIN_KM] driven. */
-    val averagePer100: Double? get() = if (km >= MIN_KM) liters / km * 100.0 else null
+    val averagePer100: Double? @Synchronized get() = if (km >= MIN_KM) liters / km * 100.0 else null
 
     @Synchronized fun reset(nowMs: Long = clock()) { liters = 0.0; km = 0.0; lastMs = null; startedAtMs = nowMs }
 
@@ -208,12 +211,15 @@ class EngineExtras {
     private val fuel = Extra(ID_FUEL, "Средний расход", "л/100км", pid = 0x10) { c -> readFuel(c) }
     private val all = listOf(voltage, rpm, fuel)
 
-    /** Cards the user hid on the «Показания» tab: not polled at all (saves bus time). */
+    /**
+     * Cards the user hid on the «Показания» tab: not polled (saves bus time) — except the fuel card,
+     * which keeps integrating the average while hidden (the UI just does not show it).
+     */
     @Volatile var userHidden: Set<String> = emptySet()
 
     /** Sensors to poll now (supported and not hidden), in card order. */
     fun sensors(): List<SensorDefinition> {
-        val off = hidden + userHidden
+        val off = hidden + (userHidden - ID_FUEL)
         val s = supported ?: return listOf(voltage).filter { it.id !in off } // ATRV works without PID list
         return all.filter {
             (it.pid == null || it.pid in s || (it.id == ID_FUEL && hasMap(s))) && it.id !in off

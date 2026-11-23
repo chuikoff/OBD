@@ -79,6 +79,45 @@ object Tpms {
         return Result("ABS 7D1 (22 C104)", emptyList(), note, Elm327Parser.clean(raw))
     }
 
+    /** Mitsubishi «21 xx» per-wheel frame (600→500 21 23…27, 773→774 21 A1…A5): bix 64 = X/5 psi, bix 72 = X−50 °C. */
+    fun parseMitsuWheel(raw: String, pid: Int, pos: String): Wheel? {
+        val p = payload(raw, 0x61, pid) ?: return null
+        val pr = u(p, 8) ?: return null
+        return Wheel(pos, psiBar(pr), temp(u(p, 9)), noSignal = pr == 0xFF)
+    }
+
+    /** Mitsubishi BCM 743→763 22 0E25…0E28: X/4 psi, 0 = no value. */
+    fun parseMitsuBcm(raw: String, did: Int, pos: String): Wheel? {
+        val p = payload(raw, 0x62, did shr 8, did and 0xFF) ?: return null
+        val x = u(p, 0) ?: return null
+        return Wheel(pos, x.takeIf { it in 1..254 }?.let { it / 4.0 * PSI_TO_BAR }, null, noSignal = x == 0xFF)
+    }
+
+    /** Outlander GF/GG TPMS sources (OBDb Mitsubishi-Outlander), each exchange logged. */
+    suspend fun probeOutlander(client: Elm327Client, log: (DtcLogLine) -> Unit): List<Result> {
+        val out = mutableListOf<Result>()
+        suspend fun wheels(tx: String, rx: String, tag: String, source: String, reqs: List<Pair<String, (String) -> Wheel?>>) {
+            Elm327Client.ecuAddressing(tx, rx).forEach { runCatching { client.send(it, timeoutMs = 1500) } }
+            val raws = mutableListOf<String>()
+            val ws = reqs.mapNotNull { (req, parse) -> send(client, req, tag, log).also { raws += it }.let(parse) }
+            if (ws.isNotEmpty()) {
+                val silent = ws.count { it.noSignal }
+                out += Result(source, ws, if (silent > 0) "Нет сигнала от $silent датчик(ов)." else null,
+                    raws.joinToString(" | ") { Elm327Parser.clean(it) })
+            }
+        }
+        val order = listOf("ПЛ", "ЗЛ", "ЗП", "ПП", "запаска")
+        wheels("600", "500", "TPMS ETACS 600", "ETACS 600 (21 23…27)",
+            order.mapIndexed { i, pos -> "21%02X".format(0x23 + i) to { r: String -> parseMitsuWheel(r, 0x23 + i, pos) } })
+        val order2 = listOf("ПЛ", "ЗП", "ЗЛ", "запаска", "ПП")
+        wheels("773", "774", "TPMS 773", "Блок TPMS 773 (21 A1…A5)",
+            order2.mapIndexed { i, pos -> "21%02X".format(0xA1 + i) to { r: String -> parseMitsuWheel(r, 0xA1 + i, pos) } })
+        val order3 = listOf("ПП", "ПЛ", "ЗП", "ЗЛ")
+        wheels("743", "763", "TPMS BCM 743", "Кузов/BCM 743 (22 0E25…0E28)",
+            order3.mapIndexed { i, pos -> "220E%02X".format(0x25 + i) to { r: String -> parseMitsuBcm(r, 0x0E25 + i, pos) } })
+        return out
+    }
+
     /** Ask every known TPMS source; each exchange is logged. */
     suspend fun probe(client: Elm327Client, log: (DtcLogLine) -> Unit): List<Result> {
         val out = mutableListOf<Result>()
@@ -90,6 +129,7 @@ object Tpms {
                 send(client, "1003", tag, log)
                 raw = send(client, req, tag, log)
                 r = parse(raw)
+                send(client, "1001", tag, log) // back to the default session
             }
             r?.let { out += it }
         }

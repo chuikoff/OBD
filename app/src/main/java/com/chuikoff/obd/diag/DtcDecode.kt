@@ -65,6 +65,26 @@ object DtcDecode {
         DiagModule("TPMS #3 (ETACS)", "600", "500")
     )
 
+    /**
+     * Full check, Mitsubishi Outlander GF/GG: the quick-check modules plus climate 688→511 and the
+     * meter/ETACS gateway 6A0→514 (OBDb Mitsubishi-Outlander). Bus discovery (7xx) adds the rest.
+     */
+    val OUTLANDER_MODULES: List<DiagModule> = QUICK_OUTLANDER + listOf(
+        DiagModule("Климат (A/C)", "688", "511"),
+        DiagModule("Комбинация приборов / ETACS (6A0)", "6A0", "514")
+    )
+
+    /**
+     * Functional (7DF) and physical OBD reads list the same code twice: keep one per (code, kind, ECU);
+     * an entry without a header (ATH0 retry) is dropped when the same code is attributed to an ECU.
+     */
+    fun mergeObdCodes(codes: List<DtcEntry>): List<DtcEntry> {
+        val withEcu = codes.filter { it.ecuId != null }.distinctBy { Triple(it.code, it.kind, it.ecuId) }
+        val anon = codes.filter { it.ecuId == null }.distinctBy { it.code to it.kind }
+            .filter { a -> withEcu.none { it.code == a.code && it.kind == a.kind } }
+        return withEcu + anon
+    }
+
     fun ecuName(id: String?): String = when (id?.uppercase()) {
         null -> "ЭБУ (адрес неизвестен)"
         "7E8" -> "Двигатель (7E8)"

@@ -12,7 +12,7 @@ import com.chuikoff.obd.sensors.SensorDefinition
  * Gearbox (ATF) temperature: [CretaAtfSensor] — EXPERIMENTAL, ScanGauge candidates probed once
  *  per connection (21A0@7E1 byte 13 / 33, 22 2081@7E1, 21A0@7E0), RAW of every probe in the CVT log.
  *  Always shown (with an error text when nothing was found).
- * Ambient: climate 7B3 22 0100 (experimental) → fallback SAE 0146, dashboard-like filter.
+ * Ambient: climate unit 7B3 KWP 21 01 byte 6, X/2−40 (= dashboard) → fallback SAE 0146, dashboard-like filter.
  */
 class Creta2018Profile : VehicleProfile {
 

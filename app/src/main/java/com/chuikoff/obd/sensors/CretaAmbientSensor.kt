@@ -25,9 +25,15 @@ object CretaAmbient {
 
     @Volatile internal var lastClimate: Double? = null
     @Volatile internal var lastClimateMs = 0L
+    @Volatile internal var probedAtMs = 0L
     const val CLIMATE_EVERY_MS = 5_000L
+    /** The climate unit may still be asleep right after ignition: when it gave nothing, ask again this often. */
+    const val REPROBE_EVERY_MS = 60_000L
 
-    fun reset() { probed = false; useClimate = false; lastClimate = null; lastClimateMs = 0L }
+    fun reset() { probed = false; useClimate = false; lastClimate = null; lastClimateMs = 0L; probedAtMs = 0L }
+
+    /** Ask 7B3 now? Before the first probe, while it works, or [REPROBE_EVERY_MS] after a failed probe. */
+    fun shouldAskClimate(now: Long): Boolean = !probed || useClimate || now - probedAtMs >= REPROBE_EVERY_MS
 
     fun decodeClimate(raw: String): Double? {
         val m = Elm327Parser.assemble(raw).firstOrNull {
@@ -42,7 +48,9 @@ object CretaAmbient {
 
     fun plausible(climate: Double, ecu: Double?): Boolean = ecu == null || (climate - ecu) in -12.0..4.0
 
-    internal fun mark(climateOk: Boolean) { probed = true; useClimate = climateOk }
+    internal fun mark(climateOk: Boolean, now: Long = System.currentTimeMillis()) {
+        probed = true; useClimate = climateOk; probedAtMs = now
+    }
 }
 
 class CretaAmbientSensor : SensorDefinition {
@@ -64,7 +72,8 @@ class CretaAmbientSensor : SensorDefinition {
         val now = System.currentTimeMillis()
         val cached = CretaAmbient.lastClimate?.takeIf { CretaAmbient.useClimate && now - CretaAmbient.lastClimateMs < CretaAmbient.CLIMATE_EVERY_MS }
         if (cached != null) climate = cached
-        else if (!CretaAmbient.probed || CretaAmbient.useClimate) {
+        else if (CretaAmbient.shouldAskClimate(now)) {
+            val logProbe = !CretaAmbient.useClimate
             try {
                 Elm327Client.ecuAddressing(CretaAmbient.TX, CretaAmbient.RX).forEach { runCatching { client.send(it, timeoutMs = 1500) } }
                 climateRaw = client.send(CretaAmbient.REQUEST, timeoutMs = 2500)
@@ -76,8 +85,9 @@ class CretaAmbientSensor : SensorDefinition {
             } finally {
                 runCatching { client.restoreEngineEcuFilter() }
             }
-            if (!CretaAmbient.probed) {
-                CretaAmbient.mark(climate != null)
+            // first probe, or a re-probe after a failure: remember the outcome (a working source stays on)
+            if (logProbe) {
+                CretaAmbient.mark(climate != null, now)
                 CvtDebugLog.add(CvtDebugEntry(System.currentTimeMillis(), "Снаружи 7B3 2101",
                     Elm327Parser.visibleRaw(climateRaw ?: ""), "проба климата", null,
                     "климат=${climate ?: "—"} · ЭБУ 0146=${ecu ?: "—"}", climate, if (climate == null) "климат не дал значения" else null))

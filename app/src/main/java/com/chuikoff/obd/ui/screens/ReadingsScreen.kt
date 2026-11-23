@@ -78,7 +78,7 @@ fun ReadingsScreen(
         if (state.lastAdapter != null || state.connectedAddress != null) {
             val busy = state.reconnecting || state.connectionState is ConnectionState.Connecting
             Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = onReconnect, enabled = !busy && !state.dtcBusy && !state.passportBusy && !state.diagBusy) {
+                OutlinedButton(onClick = onReconnect, enabled = !busy && !state.dtcBusy && !state.passportBusy && !state.diagBusy && !state.cvtOilBusy) {
                     Text(if (busy) "Переподключение…" else "Переподключиться")
                 }
                 if (busy) {
@@ -155,7 +155,8 @@ private fun VisibilityBlock(state: ObdUiState, onSetHidden: (String, Boolean) ->
             if (open) {
                 Text(
                     "Долгое нажатие на карточку — «Скрыть». Скрытые не показываются и в Android Auto; " +
-                        "напряжение, обороты и расход при этом не опрашиваются. Предупреждения (перегрев, гололёд) работают всегда.",
+                        "напряжение и обороты при этом не опрашиваются. Средний расход копится и скрытым. " +
+                        "Предупреждения (перегрев, гололёд) работают всегда.",
                     style = MaterialTheme.typography.bodySmall
                 )
                 names.forEach { (id, name) ->
